@@ -40,7 +40,8 @@ class SalesSession {
 }
 
 class DialogResponse {
-  const DialogResponse(this.text, this.state, {this.result});
+  const DialogResponse(this.text, this.state,
+      {this.result, this.understood = true});
 
   /// Texto exibido E falado.
   final String text;
@@ -48,6 +49,10 @@ class DialogResponse {
 
   /// Preenchido apenas no estado [DialogState.result].
   final PricingResult? result;
+
+  /// false quando a fala nao pode ser interpretada no estado atual (pedido de repeticao).
+  /// A camada de LLM local usa isso para tentar uma segunda interpretacao.
+  final bool understood;
 }
 
 /// Motor de dialogo 100% local e deterministico.
@@ -202,5 +207,6 @@ class DialogMachine {
   }
 
   /// Mensagem de erro/reprompt: nao muda de estado nem sobrescreve o ultimo prompt valido.
-  DialogResponse _retry(String text) => DialogResponse(text, _state);
+  DialogResponse _retry(String text) =>
+      DialogResponse(text, _state, understood: false);
 }

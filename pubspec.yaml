@@ -4,7 +4,8 @@ publish_to: "none"
 version: 0.1.0+1
 
 environment:
-  sdk: ">=3.3.0 <4.0.0"
+  sdk: ">=3.12.0 <4.0.0"
+  flutter: ">=3.44.0"
 
 dependencies:
   flutter:
@@ -12,7 +13,11 @@ dependencies:
   # Voz via sistema operacional (fallback offline quando o pacote de idioma esta instalado).
   speech_to_text: ^7.0.0
   flutter_tts: ^4.2.0
-  # Fase 2 (nao incluido no esqueleto): flutter_gemma / sherpa_onnx / whisper.cpp
+  # Fase 2: LLM local (GGUF via llama.cpp). Atualizar os pacotes flutter_edge_ai_* juntos.
+  # (flutter_gemma foi renomeado para flutter_edge_ai.)
+  flutter_edge_ai: ^2.7.1
+  flutter_edge_ai_llama: ^0.2.0
+  # Fase 3 (nao incluido): STT whisper.cpp / sherpa-onnx e TTS Piper pt-BR.
 
 dev_dependencies:
   flutter_test:

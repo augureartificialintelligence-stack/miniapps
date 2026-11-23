@@ -57,9 +57,16 @@ int? _wordsToInt(List<String> words) {
   return found ? total + current : null;
 }
 
+/// Expressoes que o parser simples NAO sabe interpretar ("duas dezenas", "meio",
+/// "meia duzia"). Em vez de ler so o primeiro numero e errar em silencio, recusamos:
+/// o fluxo reprompta ou delega ao LLM local (fase 2).
+final _ambiguous =
+    RegExp(r'\b(dezenas?|duzias?|centenas?|meio|meia|metade|milhao|milhoes)\b');
+
 /// Extrai um inteiro da fala: "20", "vinte", "vinte e cinco", "1.500".
 int? parseInteger(String input) {
   final t = normalizePt(input);
+  if (_ambiguous.hasMatch(t)) return null;
   final digits = RegExp(r'\d+(?:\.\d{3})*').firstMatch(t);
   if (digits != null) {
     return int.tryParse(digits.group(0)!.replaceAll('.', ''));
@@ -71,6 +78,7 @@ int? parseInteger(String input) {
 /// "trinta e cinco reais", "50 centavos".
 int? parseMoneyCents(String input) {
   final t = normalizePt(input).replaceAll('r\$', ' ');
+  if (_ambiguous.hasMatch(t)) return null;
   // 12,50 | 12.50 (virgula/ponto decimal com 1-2 casas)
   final dec = RegExp(r'(\d+(?:\.\d{3})*)[,.](\d{1,2})(?!\d)').firstMatch(t);
   if (dec != null) {

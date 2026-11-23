@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../core/dialog_machine.dart';
 import '../core/pricing_calculator.dart';
+import '../llm/llm_engine.dart';
+import '../llm/smart_dialog.dart';
 import '../voice/voice_engines.dart';
 
 class ChatMessage {
@@ -13,23 +15,34 @@ class ChatMessage {
 /// Tela unica: botao grande de falar, alternativa de digitar, leitura em voz alta e
 /// confirmacao da transcricao antes de agir (riscos de erro de fala do documento AUGURE).
 class VoiceScreen extends StatefulWidget {
-  const VoiceScreen({super.key, required this.stt, required this.tts});
+  const VoiceScreen({
+    super.key,
+    required this.stt,
+    required this.tts,
+    required this.dialog,
+    this.llm,
+  });
 
   final SttEngine stt;
   final TtsEngine tts;
+  final SmartDialog dialog;
+
+  /// LLM local opcional. Sem ele (ou antes do download) o app usa so o fluxo deterministico.
+  final InstallableLlm? llm;
 
   @override
   State<VoiceScreen> createState() => _VoiceScreenState();
 }
 
 class _VoiceScreenState extends State<VoiceScreen> {
-  final _machine = DialogMachine();
   final _messages = <ChatMessage>[];
   final _textCtrl = TextEditingController();
   final _scroll = ScrollController();
 
   bool _sttAvailable = false;
   bool _listening = false;
+  bool _busy = false; // aguardando o LLM local
+  int? _downloadPercent; // != null enquanto baixa o modelo
   String? _pendingTranscript; // aguardando Confirmar/Corrigir
   PricingResult? _lastResult;
 
@@ -44,7 +57,13 @@ class _VoiceScreenState extends State<VoiceScreen> {
     final ok = await widget.stt.init();
     if (!mounted) return;
     setState(() => _sttAvailable = ok);
-    _assistantSays(_machine.start());
+    _assistantSays(widget.dialog.start());
+    // Carrega o modelo se ja foi baixado antes (silencioso; falha = sem LLM).
+    final llm = widget.llm;
+    if (llm != null) {
+      await llm.load();
+      if (mounted) setState(() {});
+    }
     if (!ok) {
       _addMessage(ChatMessage(
           'O microfone não está disponível neste aparelho. Você pode digitar abaixo.',
@@ -77,11 +96,66 @@ class _VoiceScreenState extends State<VoiceScreen> {
     widget.tts.speak(r.text);
   }
 
-  void _submit(String text) {
+  Future<void> _submit(String text) async {
     final t = text.trim();
-    if (t.isEmpty) return;
+    if (t.isEmpty || _busy) return;
     _addMessage(ChatMessage(t, fromAssistant: false));
-    _assistantSays(_machine.handle(t));
+    setState(() => _busy = true);
+    try {
+      final r = await widget.dialog.handle(t);
+      if (mounted) _assistantSays(r);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _downloadModel() async {
+    final llm = widget.llm;
+    if (llm == null) return;
+    setState(() => _downloadPercent = 0);
+    try {
+      await llm.install(onProgress: (p) {
+        if (mounted) setState(() => _downloadPercent = p);
+      });
+      await llm.load();
+      _addMessage(ChatMessage(
+          'Pronto! O assistente inteligente está ativo e funciona sem internet.',
+          fromAssistant: true));
+    } catch (_) {
+      _addMessage(ChatMessage(
+          'Não consegui baixar o modelo agora. O app continua funcionando normalmente.',
+          fromAssistant: true));
+    } finally {
+      if (mounted) setState(() => _downloadPercent = null);
+    }
+  }
+
+  Widget _llmBanner(BuildContext context) {
+    final llm = widget.llm;
+    if (llm == null || llm.isReady) return const SizedBox.shrink();
+    final mb = (llm.approxDownloadBytes / 1000000).round();
+    return Card(
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: _downloadPercent != null
+            ? Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('Baixando assistente inteligente… $_downloadPercent%'),
+                const SizedBox(height: 8),
+                LinearProgressIndicator(value: _downloadPercent! / 100),
+              ])
+            : Row(children: [
+                Expanded(
+                  child: Text(
+                      'Assistente inteligente (opcional): entende falas mais livres, '
+                      'sem internet depois de baixar. Download de cerca de $mb MB — '
+                      'use o Wi-Fi.'),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(onPressed: _downloadModel, child: const Text('Baixar')),
+              ]),
+      ),
+    );
   }
 
   Future<void> _toggleListen() async {
@@ -129,6 +203,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
       body: SafeArea(
         child: Column(
           children: [
+            _llmBanner(context),
             Expanded(
               child: ListView.builder(
                 controller: _scroll,
@@ -182,6 +257,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
                       _submit(v);
                       _textCtrl.clear();
                     },
+                    enabled: !_busy,
                     decoration: const InputDecoration(
                       hintText: 'Ou digite aqui',
                       border: OutlineInputBorder(),

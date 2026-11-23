@@ -59,6 +59,9 @@ void main() {
       expect(parseInteger('1.500'), 1500);
       expect(parseInteger('quero 30'), 30);
       expect(parseInteger('nada'), isNull);
+      // ambiguos: recusa em vez de ler so o primeiro numero
+      expect(parseInteger('duas dezenas'), isNull);
+      expect(parseInteger('meia duzia'), isNull);
     });
 
     test('dinheiro', () {
@@ -69,6 +72,7 @@ void main() {
       expect(parseMoneyCents('cinquenta centavos'), 50);
       expect(parseMoneyCents('120'), 12000);
       expect(parseMoneyCents('abc'), isNull);
+      expect(parseMoneyCents('oitenta e sete e meio'), isNull);
     });
 
     test('sim/nao e comandos', () {
