@@ -2,6 +2,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../core/dialog_machine.dart';
 import '../core/pricing_calculator.dart';
+import '../core/pt_br_parser.dart' show speakDuration;
 import '../llm/llm_engine.dart';
 import '../llm/smart_dialog.dart';
 import '../voice/voice_engines.dart';
@@ -45,6 +46,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
   int? _downloadPercent; // != null enquanto baixa o modelo
   String? _pendingTranscript; // aguardando Confirmar/Corrigir
   PricingResult? _lastResult;
+  SalesSession? _lastSession; // triagem do produto calculado (ficha)
 
   @override
   void initState() {
@@ -92,7 +94,16 @@ class _VoiceScreenState extends State<VoiceScreen> {
 
   void _assistantSays(DialogResponse r) {
     _addMessage(ChatMessage(r.text, fromAssistant: true));
-    if (r.result != null) setState(() => _lastResult = r.result);
+    setState(() {
+      if (r.result != null) {
+        _lastResult = r.result;
+        _lastSession = widget.dialog.machine.session;
+      } else if (r.state != DialogState.result) {
+        // Novo calculo em andamento: o resumo antigo sai da tela.
+        _lastResult = null;
+        _lastSession = null;
+      }
+    });
     widget.tts.speak(r.text);
   }
 
@@ -198,8 +209,22 @@ class _VoiceScreenState extends State<VoiceScreen> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final company = widget.dialog.machine.session.company;
     return Scaffold(
-      appBar: AppBar(title: const Text('Assistente de Vendas')),
+      appBar: AppBar(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Assistente de Vendas'),
+            if (company != null)
+              Text(company,
+                  style: Theme.of(context)
+                      .textTheme
+                      .bodyMedium
+                      ?.copyWith(color: scheme.onSurfaceVariant)),
+          ],
+        ),
+      ),
       body: SafeArea(
         child: Column(
           children: [
@@ -210,7 +235,9 @@ class _VoiceScreenState extends State<VoiceScreen> {
                 padding: const EdgeInsets.all(16),
                 itemCount: _messages.length + (_lastResult != null ? 1 : 0),
                 itemBuilder: (_, i) {
-                  if (i == _messages.length) return _ResultCard(_lastResult!);
+                  if (i == _messages.length) {
+                    return _ResultCard(_lastResult!, _lastSession);
+                  }
                   return _Bubble(_messages[i]);
                 },
               ),
@@ -325,11 +352,22 @@ class _Bubble extends StatelessWidget {
 }
 
 class _ResultCard extends StatelessWidget {
-  const _ResultCard(this.r);
+  const _ResultCard(this.r, this.s);
   final PricingResult r;
+  final SalesSession? s;
 
   @override
   Widget build(BuildContext context) {
+    final s = this.s;
+    final specs = <(String, String)>[
+      if (s?.company != null) ('Empresa', s!.company!),
+      if (s?.product != null) ('Produto', s!.product!),
+      if (s?.materials != null) ('Materiais', s!.materials!),
+      if (s?.batchYield != null) ('Rende por lote', '${s!.batchYield} unidades'),
+      if (s?.productionMinutes != null)
+        ('Tempo por lote', speakDuration(s!.productionMinutes!)),
+      if (s?.characteristics != null) ('Características', s!.characteristics!),
+    ];
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 8),
       child: Padding(
@@ -337,6 +375,12 @@ class _ResultCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            if (specs.isNotEmpty) ...[
+              Text('Ficha do produto', style: Theme.of(context).textTheme.titleLarge),
+              const SizedBox(height: 8),
+              for (final (label, value) in specs) _spec(context, label, value),
+              const Divider(height: 24),
+            ],
             Text('Resumo', style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 8),
             _row('Custo por unidade', formatBrl(r.unitCostCents)),
@@ -348,6 +392,20 @@ class _ResultCard extends StatelessWidget {
       ),
     );
   }
+
+  /// Linha de texto livre: rotulo em cima, valor embaixo (valores podem ser longos).
+  Widget _spec(BuildContext context, String label, String value) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label,
+                style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant)),
+            Text(value, style: const TextStyle(fontSize: 16)),
+          ],
+        ),
+      );
 
   Widget _row(String a, String b) => Padding(
         padding: const EdgeInsets.symmetric(vertical: 2),

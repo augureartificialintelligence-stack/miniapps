@@ -31,6 +31,14 @@ class FakeLlm implements LlmEngine {
   Future<void> dispose() async {}
 }
 
+/// Triagem deterministica (o LLM nao deve ser chamado aqui) ate a pergunta de quantidade.
+Future<void> triage(SmartDialog d) async {
+  for (final t in ['Doces da Ana', 'marmitas', 'arroz e frango', 'rende vinte', 'duas horas', 'pular']) {
+    await d.handle(t);
+  }
+  expect(d.machine.state, DialogState.askQuantity);
+}
+
 SmartDialog build(FakeLlm llm) =>
     SmartDialog(DialogMachine(), UtteranceInterpreter(llm))..start();
 
@@ -39,7 +47,7 @@ void main() {
     test('quantidade em fala livre que o parser nao entende', () async {
       final llm = FakeLlm(['{"quantity": 20}']);
       final d = build(llm);
-      await d.handle('marmitas');
+      await triage(d);
       final r = await d.handle('umas duas dezenas, mais ou menos');
       expect(r.state, DialogState.askCost);
       expect(d.machine.session.quantity, 20);
@@ -49,7 +57,7 @@ void main() {
     test('custo decimal vira forma canonica e e re-validado', () async {
       final llm = FakeLlm(['{"reais": 87.5}']);
       final d = build(llm);
-      await d.handle('bolos');
+      await triage(d);
       await d.handle('dez bolinhos');
       final r = await d.handle('gastei uns oitenta e sete e meio');
       expect(r.state, DialogState.askMargin);
@@ -59,7 +67,7 @@ void main() {
     test('parser deterministico resolve primeiro: LLM nao e chamado', () async {
       final llm = FakeLlm([]);
       final d = build(llm);
-      await d.handle('marmitas');
+      await triage(d);
       await d.handle('vinte');
       expect(llm.prompts, isEmpty);
     });
@@ -67,7 +75,7 @@ void main() {
     test('null do LLM mantem a mensagem de erro original', () async {
       final llm = FakeLlm(['{"quantity": null}']);
       final d = build(llm);
-      await d.handle('marmitas');
+      await triage(d);
       final r = await d.handle('sei la');
       expect(r.state, DialogState.askQuantity);
       expect(r.understood, isFalse);
@@ -76,7 +84,7 @@ void main() {
     test('valor absurdo do LLM e barrado pela maquina', () async {
       final llm = FakeLlm(['{"percent": 250}']);
       final d = build(llm);
-      await d.handle('marmitas');
+      await triage(d);
       await d.handle('10');
       await d.handle('50 reais');
       final r = await d.handle('quero ganhar bastante');
@@ -86,34 +94,34 @@ void main() {
 
     test('lixo e texto ao redor do JSON sao tolerados / rejeitados', () async {
       final ok = build(FakeLlm(['Claro! {"quantity": 5} espero ter ajudado']));
-      await ok.handle('marmitas');
+      await triage(ok);
       await ok.handle('cinco unidades pra mim');
       expect(ok.machine.session.quantity, 5);
 
       final bad = build(FakeLlm(['nao sei responder']));
-      await bad.handle('marmitas');
+      await triage(bad);
       final r = await bad.handle('blablabla');
       expect(r.state, DialogState.askQuantity);
     });
 
     test('falha ou LLM indisponivel cai no fluxo deterministico', () async {
       final boom = build(FakeLlm([], throws: true));
-      await boom.handle('marmitas');
+      await triage(boom);
       expect((await boom.handle('hmm')).state, DialogState.askQuantity);
 
       final off = build(FakeLlm([], ready: false));
-      await off.handle('marmitas');
+      await triage(off);
       expect((await off.handle('hmm')).state, DialogState.askQuantity);
 
       final none = SmartDialog(DialogMachine())..start();
-      await none.handle('marmitas');
+      await triage(none);
       expect((await none.handle('hmm')).state, DialogState.askQuantity);
     });
 
     test('confirmacao em fala livre', () async {
       final llm = FakeLlm(['{"answer": "sim"}']);
       final d = build(llm);
-      await d.handle('marmitas');
+      await triage(d);
       await d.handle('10');
       await d.handle('50 reais');
       await d.handle('20');
@@ -122,12 +130,12 @@ void main() {
       expect(llm.prompts, isEmpty);
 
       final d2 = build(FakeLlm(['{"answer": "nao"}']));
-      await d2.handle('marmitas');
+      await triage(d2);
       await d2.handle('10');
       await d2.handle('50 reais');
       await d2.handle('20');
       final r2 = await d2.handle('hmm, acho que o custo tava errado');
-      expect(r2.state, DialogState.askProduct);
+      expect(r2.state, DialogState.askQuantity); // corrige so os numeros
     });
   });
 }

@@ -36,6 +36,31 @@ class UtteranceInterpreter {
 
   _Spec? _specFor(DialogState state) {
     switch (state) {
+      // Texto livre: o parser deterministico ja aceita qualquer fala nao vazia.
+      case DialogState.askCompany:
+      case DialogState.askMaterials:
+      case DialogState.askCharacteristics:
+        return null;
+      case DialogState.askBatchYield:
+        return _Spec(
+          schema: _obj({'units': _t(['integer', 'null'])}),
+          prompt: (u) => 'Extraia quantas unidades rende UMA producao/lote (numero '
+              'inteiro). $_rules\nFala: "$u"\nFormato: {"units": 20}',
+          canonical: (j) {
+            final v = j['units'];
+            return v is num && v == v.roundToDouble() ? '${v.toInt()}' : null;
+          },
+        );
+      case DialogState.askProductionTime:
+        return _Spec(
+          schema: _obj({'minutes': _t(['integer', 'null'])}),
+          prompt: (u) => 'Extraia o tempo para produzir um lote, convertido em MINUTOS '
+              '(numero inteiro). $_rules\nFala: "$u"\nFormato: {"minutes": 90}',
+          canonical: (j) {
+            final v = j['minutes'];
+            return v is num && v > 0 && v == v.roundToDouble() ? '${v.toInt()} minutos' : null;
+          },
+        );
       case DialogState.askProduct:
         return _Spec(
           schema: _obj({'product': _t(['string', 'null'])}),

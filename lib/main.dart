@@ -14,6 +14,8 @@ Future<void> main() async {
   runApp(const AugureMiniApp());
 }
 
+const _seed = Color(0xFF1B5E7B);
+
 class AugureMiniApp extends StatefulWidget {
   const AugureMiniApp({super.key});
 
@@ -36,8 +38,16 @@ class _AugureMiniAppState extends State<AugureMiniApp> {
     return MaterialApp(
       title: 'AUGURE Assistente de Vendas',
       debugShowCheckedModeBanner: false,
+      // Tema claro/escuro segue a configuracao do sistema.
+      themeMode: ThemeMode.system,
       theme: ThemeData(
-        colorSchemeSeed: const Color(0xFF1B5E7B),
+        colorSchemeSeed: _seed,
+        brightness: Brightness.light,
+        useMaterial3: true,
+      ),
+      darkTheme: ThemeData(
+        colorSchemeSeed: _seed,
+        brightness: Brightness.dark,
         useMaterial3: true,
       ),
       home: VoiceScreen(

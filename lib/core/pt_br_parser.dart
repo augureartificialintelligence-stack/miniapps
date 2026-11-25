@@ -148,3 +148,156 @@ String? parseProductName(String input) {
   t = t.replaceAll(RegExp(r'[.!?]+$'), '').trim();
   return t.isEmpty ? null : t;
 }
+
+// ---------------------------------------------------------------------------
+// Triagem: empresa, especificacoes de producao.
+// ---------------------------------------------------------------------------
+
+/// true quando a pessoa quer pular uma pergunta opcional ("pular", "nao sei", "nenhuma").
+/// So vale para a fala INTEIRA: "sem acucar" e uma caracteristica, nao um pulo.
+bool isSkip(String input) {
+  final t = normalizePt(input).replaceAll(RegExp(r'[^a-z ]'), '').trim();
+  return RegExp(r'^(pode\s+)?(pular|pula|passar|proxima)$|'
+          r'^(nenhum|nenhuma|nada|nao tem|nao tenho|nao sei|sem nome|nao tem nome)$')
+      .hasMatch(t);
+}
+
+/// Remove pontuacao final e espacos.
+String _clean(String s) => s.replaceAll(RegExp(r'[.!?]+$'), '').trim();
+
+/// Primeira letra de cada palavra em maiuscula (exceto conectivos). O STT costuma
+/// devolver tudo minusculo; nome de empresa fica melhor capitalizado.
+String titleCasePt(String s) {
+  const small = {'de', 'da', 'do', 'das', 'dos', 'e', 'a', 'o'};
+  final words = s.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+  return [
+    for (var i = 0; i < words.length; i++)
+      (i > 0 && small.contains(words[i].toLowerCase()))
+          ? words[i].toLowerCase()
+          : words[i][0].toUpperCase() + words[i].substring(1),
+  ].join(' ');
+}
+
+/// Nome da empresa: "minha empresa se chama doces da ana" -> "Doces da Ana".
+String? parseCompanyName(String input) {
+  var t = _clean(input);
+  t = t.replaceFirst(
+      RegExp(
+          r'^((o\s+)?nome\s+(da|do|e|é)\s+(minha\s+|meu\s+)?(empresa|loja|marca|negocio|negócio)\s+(e|é)\s+|'
+          r'(a\s+|o\s+)?(minha|meu)\s+(empresa|loja|marca|negocio|negócio)\s+(se\s+chama|chama|e|é)\s+|'
+          r'(o\s+nome\s+(e|é)|se\s+chama|chama|(e|é)\s+(a|o))\s+)',
+          caseSensitive: false),
+      '');
+  t = t.trim();
+  return t.isEmpty ? null : titleCasePt(t);
+}
+
+/// Materiais/ingredientes (texto livre): tira "e feito de", "eu uso", "leva".
+String? parseMaterials(String input) {
+  var t = _clean(input);
+  t = t.replaceFirst(
+      RegExp(
+          r'^((ele|ela)\s+)?((e|é)\s+)?(feit[oa]s?\s+(de|com)|(eu\s+)?(uso|usamos|uso\s+de)|levam?|vai|vao|vão|tem)\s+',
+          caseSensitive: false),
+      '');
+  t = t.trim();
+  return t.isEmpty ? null : t;
+}
+
+/// Caracteristicas (texto livre): tamanho, peso, sabor, cor.
+String? parseCharacteristics(String input) {
+  var t = _clean(input);
+  t = t.replaceFirst(RegExp(r'^((ele|ela)\s+)?(e|é|tem)\s+', caseSensitive: false), '');
+  t = t.trim();
+  return t.isEmpty ? null : t;
+}
+
+/// Rendimento do lote: "uma fornada rende vinte" -> 20 (le o numero DEPOIS do verbo,
+/// para nao pegar o "uma" de "uma fornada").
+int? parseBatchYield(String input) {
+  final t = normalizePt(input);
+  final verb = RegExp(r'\b(rende|rendem|faz|fazem|sai|saem|produz|produzem|da|dao)\b')
+      .firstMatch(t);
+  final tail = verb != null ? t.substring(verb.end) : t;
+  return parseInteger(tail);
+}
+
+/// Minutos por unidade de tempo reconhecida.
+int? _unitMinutes(String w) {
+  if (RegExp(r'^(minutos?|min)$').hasMatch(w)) return 1;
+  if (RegExp(r'^(horas?|h)$').hasMatch(w)) return 60;
+  if (RegExp(r'^dias?$').hasMatch(w)) return 60 * 24;
+  return null;
+}
+
+bool _isNumberWord(String w) =>
+    _units.containsKey(w) ||
+    _tens.containsKey(w) ||
+    _hundreds.containsKey(w) ||
+    w == 'mil' ||
+    RegExp(r'^\d+([.,]\d+)?$').hasMatch(w);
+
+/// Tempo de producao em MINUTOS: "duas horas", "1 hora e meia", "meia hora",
+/// "40 minutos", "2h30", "um dia". Exige unidade; numero solto e ambiguo (null).
+int? parseDurationMinutes(String input) {
+  var t = normalizePt(input);
+  // pontuacao que nao e separador decimal ("duas horas." / "ah, uns 40 minutos")
+  t = t.replaceAll(RegExp(r'(?<!\d)[.,]|[.,](?!\d)'), ' ');
+  t = t.replaceAll(RegExp(r'\bmeia\s+hora\b'), '30 minutos');
+  t = t.replaceAllMapped(RegExp(r'(\d)\s*h\s*(\d{1,2})\b'), (m) => '${m[1]} horas ${m[2]} minutos');
+  t = t.replaceAllMapped(RegExp(r'(\d)h\b'), (m) => '${m[1]} horas');
+  final tokens =
+      t.split(RegExp(r'[^a-z0-9,.]+')).where((w) => w.isNotEmpty).toList();
+
+  var total = 0;
+  var found = false;
+  final number = <String>[];
+  for (var i = 0; i < tokens.length; i++) {
+    final w = tokens[i];
+    final unit = _unitMinutes(w);
+    if (unit != null) {
+      double? n;
+      if (number.isEmpty) {
+        n = RegExp(r's$').hasMatch(w) ? null : 1; // "hora" sozinha = 1 hora
+      } else if (number.length == 1 && RegExp(r'^\d').hasMatch(number.first)) {
+        n = double.tryParse(number.first.replaceAll(',', '.'));
+      } else {
+        n = _wordsToInt(number)?.toDouble();
+      }
+      number.clear();
+      if (n == null) continue;
+      var minutes = n * unit;
+      // "... e meia" / "... e meio" logo depois da unidade
+      if (i + 2 < tokens.length &&
+          tokens[i + 1] == 'e' &&
+          (tokens[i + 2] == 'meia' || tokens[i + 2] == 'meio')) {
+        minutes += unit / 2;
+        i += 2;
+      }
+      total += minutes.round();
+      found = true;
+    } else if (_isNumberWord(w)) {
+      number.add(w);
+    } else if (w == 'e' && number.isNotEmpty) {
+      number.add(w); // "vinte e cinco minutos"
+    } else {
+      number.clear();
+    }
+  }
+  return found && total > 0 ? total : null;
+}
+
+/// Versao falada da duracao: 150 -> "2 horas e 30 minutos".
+String speakDuration(int minutes) {
+  final d = minutes ~/ (60 * 24);
+  final h = (minutes % (60 * 24)) ~/ 60;
+  final m = minutes % 60;
+  String part(int n, String one, String many) => '$n ${n == 1 ? one : many}';
+  final parts = [
+    if (d > 0) part(d, 'dia', 'dias'),
+    if (h > 0) part(h, 'hora', 'horas'),
+    if (m > 0) part(m, 'minuto', 'minutos'),
+  ];
+  if (parts.length <= 1) return parts.isEmpty ? '0 minutos' : parts.first;
+  return '${parts.sublist(0, parts.length - 1).join(', ')} e ${parts.last}';
+}
