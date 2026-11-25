@@ -228,10 +228,15 @@ void main() {
       expect(m.handle('recomeçar').state, DialogState.askQuantity);
       expect(m.session.product, 'marmitas');
 
-      // Sem cadastro (produto nao respondido), recomecar volta ao inicio.
+      // Sem produto ainda, recomecar mantem a empresa e volta a pergunta do produto.
       final fresh = DialogMachine()..start();
       fresh.handle('Doces da Ana');
-      expect(fresh.handle('recomeçar').state, DialogState.askCompany);
+      expect(fresh.handle('recomeçar').state, DialogState.askProduct);
+      expect(fresh.session.company, 'Doces da Ana');
+
+      // Sem nada respondido, volta ao comeco de tudo.
+      final empty = DialogMachine()..start();
+      expect(empty.handle('recomeçar').state, DialogState.askCompany);
     });
 
     test('nao na confirmacao corrige so os numeros e mantem a triagem', () {
@@ -274,6 +279,16 @@ void main() {
       expect(again.handle('corrigir o tempo').state, DialogState.askProductionTime);
       expect(again.handle('três horas').state, DialogState.askQuantity);
       expect(again.profile.productionMinutes, 180);
+    });
+
+    test('novo produto da mesma empresa comeca pelo produto', () {
+      final m = DialogMachine(profile: const SalesSession(company: 'Doces da Ana'));
+      final r = m.start();
+      expect(r.state, DialogState.askProduct);
+      expect(r.text, contains('novo produto para Doces da Ana'));
+      expect(m.handle('bolo de pote').state, DialogState.askMaterials);
+      expect(m.profile.product, 'bolo de pote');
+      expect(m.handle('corrigir empresa').state, DialogState.askCompany);
     });
 
     test('recomecar depois do resultado recalcula o mesmo produto', () {

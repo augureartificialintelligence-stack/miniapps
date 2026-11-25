@@ -176,9 +176,8 @@ class _VoiceScreenState extends State<VoiceScreen> {
     });
   }
 
-  /// Comeca do zero (mantem empresa e fichas salvas).
-  void _newConversation() {
-    if (_busy) return;
+  /// Limpa a tela e comeca a conversa com o cadastro que estiver na maquina.
+  void _restartScreen() {
     _cancelListening();
     widget.tts.stop();
     setState(() {
@@ -190,6 +189,78 @@ class _VoiceScreenState extends State<VoiceScreen> {
       _textCtrl.clear();
     });
     _assistantSays(widget.dialog.start());
+  }
+
+  /// "Nova conversa": cadastra um produto novo do zero. O produto atual fica salvo em
+  /// "Meus produtos" (ficha, tabela de custo e ultimo preco) para voltar depois.
+  Future<void> _newConversation() async {
+    if (_busy) return;
+    final machine = widget.dialog.machine;
+    final current = machine.profile.product;
+    if (current != null) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Cadastrar novo produto?'),
+          content: Text('O produto atual ($current) fica salvo em "Meus produtos" e você '
+              'pode voltar a ele quando quiser.'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancelar')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Novo produto')),
+          ],
+        ),
+      );
+      if (ok != true || !mounted) return;
+    }
+    await widget.store?.startNewProduct();
+    machine.profile = SalesSession(company: machine.profile.company);
+    _restartScreen();
+  }
+
+  /// "Meus produtos": lista os produtos salvos para voltar a um deles.
+  Future<void> _showProducts() async {
+    final store = widget.store;
+    if (store == null || _busy) return;
+    final activeId = store.activeProduct?.id;
+    final chosen = await showModalBottomSheet<ProductRecord>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Text('Meus produtos', style: Theme.of(ctx).textTheme.titleLarge),
+            ),
+            for (final p in store.products)
+              ListTile(
+                leading: const Icon(Icons.inventory_2_outlined),
+                title: Text(p.name),
+                subtitle: Text([
+                  if (p.lastUnitPriceCents != null)
+                    'Último preço: ${formatBrl(p.lastUnitPriceCents!)}',
+                  if (p.session.costs?.unitCostCents != null)
+                    'custo ${formatBrl(p.session.costs!.unitCostCents!)}/un.',
+                  if (p.lastUnitPriceCents == null && p.session.costs == null)
+                    'Sem preço calculado ainda',
+                ].join(' · ')),
+                trailing: p.id == activeId
+                    ? const Chip(label: Text('Atual'), visualDensity: VisualDensity.compact)
+                    : const Icon(Icons.chevron_right),
+                onTap: () => Navigator.pop(ctx, p),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (chosen == null || chosen.id == activeId || !mounted) return;
+    await store.activate(chosen.id);
+    widget.dialog.machine.profile = chosen.session;
+    _restartScreen();
   }
 
   Future<void> _submit(String text) async {
@@ -358,8 +429,14 @@ class _VoiceScreenState extends State<VoiceScreen> {
           ],
         ),
         actions: [
+          if ((widget.store?.products.length ?? 0) > 0)
+            IconButton(
+              tooltip: 'Meus produtos',
+              onPressed: _busy ? null : _showProducts,
+              icon: const Icon(Icons.inventory_2_outlined),
+            ),
           IconButton(
-            tooltip: 'Nova conversa',
+            tooltip: 'Nova conversa (novo produto)',
             onPressed: _busy ? null : _newConversation,
             icon: const Icon(Icons.add_comment_outlined),
           ),

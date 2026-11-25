@@ -10,8 +10,10 @@ import 'local_rag.dart';
 
 /// Memoria local do app, em arquivos no armazenamento privado do aparelho.
 ///
-/// - `augure_memoria.json`: cadastro do usuario (empresa + UM produto + especificacoes),
-///   ultimo preco calculado e a conversa em andamento (para retomar se o app fechar).
+/// - `augure_memoria.json`: empresa do usuario, os produtos cadastrados (cada um com
+///   especificacoes, tabela de custo e ultimo preco), qual produto esta ATIVO e a
+///   conversa em andamento (para retomar se o app fechar). Um produto por vez esta em
+///   uso; os outros ficam guardados em "Meus produtos" para voltar a eles.
 /// - `augure_exemplos.jsonl`: um evento por linha: como cada fala foi interpretada e as
 ///   correcoes feitas pela pessoa. E a base do aprendizado local: exemplos parecidos sao
 ///   recuperados (RAG) e entregues ao LLM como contexto, e o arquivo pode ser exportado
@@ -29,11 +31,30 @@ class ConversationStore implements InterpreterContext {
   /// Conversas paradas ha mais tempo que isso comecam do zero (o cadastro fica).
   static const resumeWindow = Duration(hours: 12);
 
-  /// Cadastro (triagem). Vazio ate a primeira triagem.
-  SalesSession profile = const SalesSession();
+  /// Empresa do usuario (vale para todos os produtos).
+  String? company;
 
-  /// Ultimo preco calculado para o produto do cadastro.
-  int? lastUnitPriceCents;
+  /// Produtos cadastrados (historico). O ativo e o da conversa atual.
+  final _products = <ProductRecord>[];
+  String? _activeId;
+
+  /// Produtos salvos, o mais recente primeiro.
+  List<ProductRecord> get products =>
+      [..._products]..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+
+  ProductRecord? get activeProduct {
+    for (final p in _products) {
+      if (p.id == _activeId) return p;
+    }
+    return null;
+  }
+
+  /// Cadastro do produto ativo (ou so a empresa, se ainda nao ha produto ativo).
+  SalesSession get profile =>
+      activeProduct?.session ?? SalesSession(company: company);
+
+  /// Ultimo preco calculado para o produto ativo.
+  int? get lastUnitPriceCents => activeProduct?.lastUnitPriceCents;
 
   Map<String, Object?>? _dialog;
   List<Map<String, Object?>> _messages = [];
@@ -61,9 +82,26 @@ class ConversationStore implements InterpreterContext {
       if (await memoryFile.exists()) {
         final j = jsonDecode(await memoryFile.readAsString());
         if (j is Map) {
-          final p = j['profile'];
-          if (p is Map) profile = SalesSession.fromJson(p.cast<String, Object?>());
-          lastUnitPriceCents = (j['lastUnitPriceCents'] as num?)?.toInt();
+          company = j['company'] as String?;
+          for (final p in (j['products'] as List? ?? const [])) {
+            if (p is Map) {
+              final r = ProductRecord.fromJson(p.cast<String, Object?>());
+              if (r != null) _products.add(r);
+            }
+          }
+          _activeId = j['activeId'] as String?;
+          // Versao 2 (um produto so): migra para a lista de produtos.
+          final old = j['profile'];
+          if (old is Map && _products.isEmpty) {
+            final s = SalesSession.fromJson(old.cast<String, Object?>());
+            company ??= s.company;
+            if (s.hasProfile) {
+              final r = ProductRecord(_newId(), s,
+                  lastUnitPriceCents: (j['lastUnitPriceCents'] as num?)?.toInt());
+              _products.add(r);
+              _activeId = r.id;
+            }
+          }
           final conv = j['conversation'];
           if (conv is Map) {
             _dialog = (conv['dialog'] as Map?)?.cast<String, Object?>();
@@ -104,27 +142,84 @@ class ConversationStore implements InterpreterContext {
   }
 
   Future<void> clearConversation() {
+    _clearConversationFields();
+    return _persist();
+  }
+
+  void _clearConversationFields() {
     _dialog = null;
     _messages = [];
     _conversationUpdatedAt = null;
-    return _persist();
   }
 
   // ---- cadastro ----
 
-  /// Salva o cadastro (so a triagem; numeros de preco nao entram).
+  /// Salva o cadastro do produto ativo (so a triagem; numeros de preco nao entram).
+  /// O primeiro salvamento com nome de produto cria o registro dele no historico; um
+  /// produto com o MESMO nome de um ja salvo atualiza aquele, sem duplicar.
   Future<void> saveProfile(SalesSession s) {
     final p = s.keepTriage();
-    if (jsonEncode(p.toJson()) == jsonEncode(profile.toJson())) return Future.value();
-    profile = p;
+    var changed = false;
+    if (p.company != company) {
+      company = p.company;
+      changed = true;
+    }
+    if (p.hasProfile) {
+      final active = activeProduct ?? _byName(p.product!);
+      if (active == null) {
+        final r = ProductRecord(_newId(), p);
+        _products.add(r);
+        _activeId = r.id;
+        changed = true;
+      } else {
+        _activeId = active.id;
+        if (jsonEncode(active.session.toJson()) != jsonEncode(p.toJson())) {
+          active
+            ..session = p
+            ..updatedAt = DateTime.now();
+          changed = true;
+        }
+      }
+    }
+    return changed ? _persist() : Future.value();
+  }
+
+  Future<void> rememberResult(SalesSession s, PricingResult r) async {
+    await saveProfile(s);
+    final active = activeProduct;
+    if (active == null) return;
+    active
+      ..lastUnitPriceCents = r.unitPriceCents
+      ..updatedAt = DateTime.now();
+    await _persist();
+  }
+
+  /// "Nova conversa": o produto atual fica salvo no historico e o proximo cadastro
+  /// comeca do zero (mantendo a empresa).
+  Future<void> startNewProduct() {
+    _activeId = null;
+    _clearConversationFields();
     return _persist();
   }
 
-  Future<void> rememberResult(SalesSession s, PricingResult r) {
-    profile = s.keepTriage();
-    lastUnitPriceCents = r.unitPriceCents;
+  /// Volta a um produto salvo ("Meus produtos").
+  Future<void> activate(String id) {
+    if (!_products.any((p) => p.id == id)) return Future.value();
+    _activeId = id;
+    _clearConversationFields();
     return _persist();
   }
+
+  ProductRecord? _byName(String name) {
+    final key = tokenizePt(name).join(' ');
+    for (final p in _products) {
+      if (tokenizePt(p.session.product ?? '').join(' ') == key) return p;
+    }
+    return null;
+  }
+
+  String _newId() =>
+      '${DateTime.now().microsecondsSinceEpoch}-${_products.length}';
 
   // ---- contexto para o LLM (RAG local) ----
 
@@ -217,9 +312,10 @@ class ConversationStore implements InterpreterContext {
   Future<void> _persist() => _serial(() async {
         await dir.create(recursive: true);
         final data = jsonEncode({
-          'version': 2,
-          'profile': profile.toJson(),
-          'lastUnitPriceCents': lastUnitPriceCents,
+          'version': 3,
+          'company': company,
+          'activeId': _activeId,
+          'products': [for (final p in _products) p.toJson()],
           'conversation': _dialog == null
               ? null
               : {
@@ -242,6 +338,37 @@ class ConversationStore implements InterpreterContext {
     final next = _writing.then((_) => op()).catchError((_) {});
     _writing = next;
     return next;
+  }
+}
+
+/// Um produto do historico ("Meus produtos").
+class ProductRecord {
+  ProductRecord(this.id, this.session, {this.lastUnitPriceCents, DateTime? updatedAt})
+      : updatedAt = updatedAt ?? DateTime.now();
+
+  final String id;
+
+  /// Cadastro do produto: triagem + tabela de custo (sem os numeros de um calculo).
+  SalesSession session;
+  int? lastUnitPriceCents;
+  DateTime updatedAt;
+
+  String get name => session.product ?? 'Produto sem nome';
+
+  Map<String, Object?> toJson() => {
+        'id': id,
+        'session': session.toJson(),
+        'lastUnitPriceCents': lastUnitPriceCents,
+        'updatedAt': updatedAt.toIso8601String(),
+      };
+
+  static ProductRecord? fromJson(Map<String, Object?> j) {
+    final id = j['id'];
+    final s = j['session'];
+    if (id is! String || s is! Map) return null;
+    return ProductRecord(id, SalesSession.fromJson(s.cast<String, Object?>()),
+        lastUnitPriceCents: (j['lastUnitPriceCents'] as num?)?.toInt(),
+        updatedAt: DateTime.tryParse(j['updatedAt'] as String? ?? ''));
   }
 }
 

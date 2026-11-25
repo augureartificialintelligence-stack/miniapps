@@ -321,6 +321,14 @@ class DialogMachine {
           '${_question(DialogState.askQuantity)} Para mudar algum dado do produto, diga, '
           'por exemplo: corrigir o tempo.');
     }
+    if (p.company != null) {
+      // Novo produto da mesma empresa: a triagem comeca pelo produto.
+      _session = SalesSession(company: p.company);
+      _state = DialogState.askProduct;
+      return _say('Vamos cadastrar um novo produto para ${p.company}. '
+          '${_question(DialogState.askProduct)} Se a empresa mudou, diga: corrigir '
+          'empresa.');
+    }
     _state = DialogState.askCompany;
     _session = const SalesSession();
     return _say('$_greeting${_question(DialogState.askCompany)}');

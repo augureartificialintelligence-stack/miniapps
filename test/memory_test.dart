@@ -107,6 +107,48 @@ void main() {
       expect(DialogMachine().restore(m.toJson()), isFalse);
     });
 
+    test('novo produto guarda o anterior; da para voltar a ele', () async {
+      final s = await ConversationStore.open(dir);
+      await s.saveProfile(_profile); // marmitas
+      expect(s.products, hasLength(1));
+
+      await s.startNewProduct();
+      expect(s.profile.product, isNull);
+      expect(s.profile.company, 'Doces da Ana'); // empresa continua
+      expect(s.resumable(), isNull); // conversa do produto anterior nao e retomada
+
+      await s.saveProfile(const SalesSession(
+          company: 'Doces da Ana', product: 'bolo de pote', batchYield: 12));
+      expect(s.products.map((p) => p.name), ['bolo de pote', 'marmitas']);
+      expect(s.profile.product, 'bolo de pote');
+
+      final again = await ConversationStore.open(dir); // sobrevive a reabertura
+      expect(again.products, hasLength(2));
+      final marmitas = again.products.firstWhere((p) => p.name == 'marmitas');
+      await again.activate(marmitas.id);
+      expect(again.profile.product, 'marmitas');
+      expect(again.profile.batchYield, 20);
+    });
+
+    test('mesmo nome de produto atualiza o salvo, sem duplicar', () async {
+      final s = await ConversationStore.open(dir);
+      await s.saveProfile(_profile);
+      await s.startNewProduct();
+      await s.saveProfile(const SalesSession(company: 'Doces da Ana', product: 'Marmita'));
+      expect(s.products, hasLength(1));
+    });
+
+    test('memoria antiga (um produto, versao 2) e migrada', () async {
+      await File('${dir.path}/${ConversationStore.memoryFileName}').writeAsString(
+          '{"version":2,"profile":{"company":"Doces da Ana","product":"marmitas"},'
+          '"lastUnitPriceCents":858}');
+      final s = await ConversationStore.open(dir);
+      expect(s.products, hasLength(1));
+      expect(s.profile.product, 'marmitas');
+      expect(s.lastUnitPriceCents, 858);
+      expect(s.company, 'Doces da Ana');
+    });
+
     test('arquivo corrompido nao trava: memoria vazia', () async {
       await File('${dir.path}/${ConversationStore.memoryFileName}').writeAsString('{lixo');
       final s = await ConversationStore.open(dir);
