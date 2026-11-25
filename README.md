@@ -12,19 +12,20 @@ App Flutter (Android/iOS), offline-first, sem login. Fluxo: falar → confirmar 
 - `test/core_test.dart` — testes do núcleo .
 
 ## Rodar
+Requer Flutter ≥ 3.47 (testado com 3.50.1 / Dart 3.14). As pastas `android/` e `ios/` já estão no repositório.
 ```bash
-flutter create . --platforms=android,ios --project-name augure_miniapps
 flutter pub get
 flutter test
 flutter run
 ```
-Permissões (adicionar após `flutter create`):
-- Android `AndroidManifest.xml`: `RECORD_AUDIO`, `INTERNET` e `<queries>` para `android.speech.RecognitionService`.
-- iOS `Info.plist`: `NSMicrophoneUsageDescription`, `NSSpeechRecognitionUsageDescription`.
+Permissões já configuradas:
+- Android `AndroidManifest.xml`: `RECORD_AUDIO`, `INTERNET` e `<queries>` para `android.speech.RecognitionService` e `android.intent.action.TTS_SERVICE`.
+- iOS `Info.plist`: `NSMicrophoneUsageDescription`, `NSSpeechRecognitionUsageDescription`. Deployment target 16.4 e `ios/Podfile` com `use_frameworks! :linkage => :static`.
 
 ## Estado de verificação
-- `lib/core`, `lib/llm` (exceto `edge_ai_llm_engine.dart`) e testes: analisados e executados com Dart puro (22/22 passam).
-- `lib/ui`, `lib/voice`, `lib/llm/edge_ai_llm_engine.dart` e `main.dart`: **não compilados nem executados** (sem Flutter SDK no ambiente de criação). Validar a API do `speech_to_text` (`SpeechListenOptions.onDevice`) e do `flutter_tts` na versão instalada.
+- `flutter analyze`: sem problemas no projeto inteiro (inclui `lib/ui`, `lib/voice` e `edge_ai_llm_engine.dart`).
+- `flutter test`: 22/22 passam.
+- **Ainda não compilado para aparelho** (Android nem iOS) e não executado em dispositivo real.
 - Voz offline depende do pacote de idioma pt-BR no aparelho (Experimento B do documento).
 
 ## Fase 2 — LLM local (incluída)

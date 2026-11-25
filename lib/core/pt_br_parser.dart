@@ -99,8 +99,7 @@ int? parseMoneyCents(String input) {
     return reais * 100 + cents;
   }
   if (t.contains(RegExp(r'\bcentavos?\b'))) {
-    final c = parseInteger(t);
-    return c == null ? null : c;
+    return parseInteger(t);
   }
   final n = parseInteger(t);
   return n == null ? null : n * 100;

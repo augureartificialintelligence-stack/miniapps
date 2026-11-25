@@ -5,11 +5,13 @@ version: 0.1.0+1
 
 environment:
   sdk: ">=3.12.0 <4.0.0"
-  flutter: ">=3.44.0"
+  # 3.47+: Material passou para o pacote material_ui.
+  flutter: ">=3.47.0"
 
 dependencies:
   flutter:
     sdk: flutter
+  material_ui: ^1.1.0
   # Voz via sistema operacional (fallback offline quando o pacote de idioma esta instalado).
   speech_to_text: ^7.0.0
   flutter_tts: ^4.2.0

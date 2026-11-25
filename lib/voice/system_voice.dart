@@ -22,10 +22,10 @@ class SystemStt implements SttEngine {
   Future<void> listen(void Function(String text, bool isFinal) onResult) async {
     if (!_ready) return;
     await _stt.listen(
-      localeId: 'pt_BR',
-      listenFor: const Duration(seconds: 20),
-      pauseFor: const Duration(seconds: 3),
       listenOptions: SpeechListenOptions(
+        localeId: 'pt_BR',
+        listenFor: const Duration(seconds: 20),
+        pauseFor: const Duration(seconds: 3),
         partialResults: true,
         // Tenta reconhecimento no aparelho; se o sistema nao suportar, ele cai para o padrao.
         onDevice: true,
