@@ -292,6 +292,15 @@ class _VoiceScreenState extends State<VoiceScreen> {
     setState(() => _pendingTranscript = null);
   }
 
+  /// "X" do cartao: descarta o que o microfone ouviu (nao envia nada). A conversa
+  /// continua na mesma pergunta, para falar de novo ou digitar.
+  void _dismissTranscript() {
+    setState(() {
+      _pendingTranscript = null;
+      _textCtrl.clear();
+    });
+  }
+
   /// Nome curto da pergunta atual (mostra a quem o texto ouvido vai responder).
   static String _questionLabel(DialogState s) => switch (s) {
         DialogState.askCompany => 'nome da empresa',
@@ -367,8 +376,23 @@ class _VoiceScreenState extends State<VoiceScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('Entendi: "$_pendingTranscript"',
-                            style: Theme.of(context).textTheme.titleMedium),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              child: Padding(
+                                padding: const EdgeInsets.only(top: 8),
+                                child: Text('Entendi: "$_pendingTranscript"',
+                                    style: Theme.of(context).textTheme.titleMedium),
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: 'Fechar',
+                              onPressed: _dismissTranscript,
+                              icon: const Icon(Icons.close),
+                            ),
+                          ],
+                        ),
                         const SizedBox(height: 4),
                         Text(
                             'Isso responde: ${_questionLabel(widget.dialog.machine.state)}',
