@@ -2,41 +2,95 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 
+import 'continuous_dictation.dart';
 import 'voice_engines.dart';
 
-/// STT do sistema (Android SpeechRecognizer / iOS Speech). Funciona offline apenas se o
-/// pacote de idioma pt-BR estiver instalado no aparelho: validar no Experimento B.
+/// STT do sistema (Android SpeechRecognizer / iOS Speech) em modo DITADO CONTINUO:
+/// so para quando a pessoa fica em silencio (ver [ContinuousDictation]).
+/// Funciona offline apenas se o pacote de idioma pt-BR estiver instalado no aparelho.
 class SystemStt implements SttEngine {
+  SystemStt() {
+    _dictation = ContinuousDictation(_PluginSession(this),
+        log: (m) => debugPrint('[AUGURE][STT] $m'));
+  }
+
   final SpeechToText _stt = SpeechToText();
+  late final ContinuousDictation _dictation;
   bool _ready = false;
+
+  /// Reconhecimento no aparelho; desliga sozinho se o pacote pt-BR offline faltar.
+  bool _onDevice = true;
+
+  void Function(String? error)? _onEnd;
 
   @override
   Future<bool> init() async {
-    _ready = await _stt.initialize();
+    _ready = await _stt.initialize(
+      onStatus: (s) {
+        if (s == SpeechToText.doneStatus || s == SpeechToText.notListeningStatus) {
+          _onEnd?.call(null);
+        }
+      },
+      onError: (e) {
+        final msg = e.errorMsg;
+        if (_onDevice &&
+            (msg == 'error_language_unavailable' || msg == 'error_language_not_supported')) {
+          debugPrint('[AUGURE][STT] pt-BR offline indisponivel; usando reconhecimento padrao');
+          _onDevice = false;
+        }
+        _onEnd?.call(msg);
+      },
+    );
     return _ready;
   }
 
   @override
-  bool get isListening => _stt.isListening;
+  bool get isListening => _dictation.isListening;
 
   @override
   Future<void> listen(void Function(String text, bool isFinal) onResult) async {
     if (!_ready) return;
-    await _stt.listen(
-      listenOptions: SpeechListenOptions(
-        localeId: 'pt_BR',
-        listenFor: const Duration(seconds: 20),
-        pauseFor: const Duration(seconds: 3),
-        partialResults: true,
-        // Tenta reconhecimento no aparelho; se o sistema nao suportar, ele cai para o padrao.
-        onDevice: true,
-      ),
-      onResult: (r) => onResult(r.recognizedWords, r.finalResult),
-    );
+    await _dictation.listen(onResult);
   }
 
   @override
-  Future<void> stop() => _stt.stop();
+  Future<void> stop() => _dictation.stop();
+
+  /// Abre UMA sessao do reconhecedor do sistema (a [ContinuousDictation] encadeia varias).
+  Future<bool> _startNative(
+    void Function(String words, bool isFinal) onWords,
+    void Function(String? error) onEnd,
+  ) async {
+    _onEnd = onEnd;
+    await _stt.listen(
+      listenOptions: SpeechListenOptions(
+        localeId: 'pt_BR',
+        listenFor: const Duration(seconds: 60),
+        partialResults: true,
+        listenMode: ListenMode.dictation,
+        cancelOnError: false,
+        onDevice: _onDevice,
+      ),
+      onResult: (r) => onWords(r.recognizedWords, r.finalResult),
+    );
+    return true;
+  }
+}
+
+/// Ponte entre a [ContinuousDictation] e o plugin speech_to_text.
+class _PluginSession implements RecognizerSession {
+  _PluginSession(this._owner);
+  final SystemStt _owner;
+
+  @override
+  Future<bool> start(
+    void Function(String words, bool isFinal) onWords,
+    void Function(String? error) onEnd,
+  ) =>
+      _owner._startNative(onWords, onEnd);
+
+  @override
+  Future<void> stop() => _owner._stt.stop();
 }
 
 /// TTS do sistema com a melhor voz pt-BR instalada no aparelho.

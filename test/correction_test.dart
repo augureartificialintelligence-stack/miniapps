@@ -93,7 +93,7 @@ void main() {
       m.handle('120 reais');
       m.handle('30');
       m.handle('sim');
-      expect(m.state, DialogState.result);
+      expect(m.state, DialogState.offerDetail); // resultado + "quer detalhar o custo?"
 
       final r = m.handle('corrigir o custo para 60 reais');
       expect(r.state, DialogState.confirm);

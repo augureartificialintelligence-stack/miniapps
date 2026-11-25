@@ -1,8 +1,9 @@
 import 'package:material_ui/material_ui.dart';
 
 import '../core/dialog_machine.dart';
+import '../core/cost_breakdown.dart';
 import '../core/pricing_calculator.dart';
-import '../core/pt_br_parser.dart' show speakDuration;
+import '../core/pt_br_parser.dart' show speakDuration, speakMeasure;
 import '../llm/llm_engine.dart';
 import '../llm/smart_dialog.dart';
 import '../memory/conversation_store.dart';
@@ -68,6 +69,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
   String? _pendingTranscript; // aguardando Confirmar/Corrigir
   PricingResult? _lastResult;
   SalesSession? _lastSession; // triagem do produto calculado (ficha)
+  CostBreakdown? _lastBreakdown; // tabela de custo detalhado
 
   @override
   void initState() {
@@ -131,10 +133,18 @@ class _VoiceScreenState extends State<VoiceScreen> {
       if (r.result != null) {
         _lastResult = r.result;
         _lastSession = machine.session;
-      } else if (r.state != DialogState.result) {
-        // Novo calculo em andamento: o resumo antigo sai da tela.
+        _lastBreakdown = null;
+      }
+      if (r.breakdown != null) {
+        _lastBreakdown = r.breakdown;
+        _lastSession = machine.session;
+      }
+      if (dialogOrder.contains(r.state) && r.state != DialogState.result) {
+        // Novo calculo em andamento: o resumo antigo sai da tela. (Na oferta e na
+        // entrevista de custo o resumo continua visivel.)
         _lastResult = null;
         _lastSession = null;
+        _lastBreakdown = null;
       }
     });
     widget.tts.speak(r.text);
@@ -174,6 +184,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
       _pendingTranscript = null;
       _lastResult = null;
       _lastSession = null;
+      _lastBreakdown = null;
       _textCtrl.clear();
     });
     _assistantSays(widget.dialog.start());
@@ -294,6 +305,8 @@ class _VoiceScreenState extends State<VoiceScreen> {
         DialogState.askMargin => 'margem',
         DialogState.confirm => 'confirmação',
         DialogState.result => 'próximo passo',
+        DialogState.offerDetail => 'detalhar o custo?',
+        DialogState.costDetail => 'tabela de custo',
       };
 
   @override
@@ -330,10 +343,11 @@ class _VoiceScreenState extends State<VoiceScreen> {
               child: ListView.builder(
                 controller: _scroll,
                 padding: const EdgeInsets.all(16),
-                itemCount: _messages.length + (_lastResult != null ? 1 : 0),
+                itemCount: _messages.length +
+                    (_lastResult != null || _lastBreakdown != null ? 1 : 0),
                 itemBuilder: (_, i) {
                   if (i == _messages.length) {
-                    return _ResultCard(_lastResult!, _lastSession);
+                    return _ResultCard(_lastResult, _lastSession, _lastBreakdown);
                   }
                   final m = _messages[i];
                   return _Bubble(m,
@@ -388,6 +402,11 @@ class _VoiceScreenState extends State<VoiceScreen> {
                 Expanded(
                   child: TextField(
                     controller: _textCtrl,
+                    // Quebra de linha: o texto cresce ate 5 linhas e depois rola, para a
+                    // pessoa ver tudo o que esta escrevendo (ou o que o microfone ouviu).
+                    minLines: 1,
+                    maxLines: 5,
+                    keyboardType: TextInputType.text,
                     textInputAction: TextInputAction.send,
                     onSubmitted: (v) {
                       _submit(v);
@@ -411,6 +430,16 @@ class _VoiceScreenState extends State<VoiceScreen> {
                 ),
               ]),
             ),
+            if (_listening)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text('Ouvindo… fale à vontade. Eu paro quando você fizer uma pausa.',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context)
+                        .textTheme
+                        .bodyMedium
+                        ?.copyWith(color: scheme.primary)),
+              ),
             Padding(
               padding: const EdgeInsets.only(bottom: 16),
               child: Semantics(
@@ -474,9 +503,12 @@ class _Bubble extends StatelessWidget {
 }
 
 class _ResultCard extends StatelessWidget {
-  const _ResultCard(this.r, this.s);
-  final PricingResult r;
+  const _ResultCard(this.r, this.s, this.costs);
+  final PricingResult? r;
   final SalesSession? s;
+
+  /// Tabela do custo detalhado (quando a pessoa fez a entrevista de custo).
+  final CostBreakdown? costs;
 
   @override
   Widget build(BuildContext context) {
@@ -503,16 +535,83 @@ class _ResultCard extends StatelessWidget {
               for (final (label, value) in specs) _spec(context, label, value),
               const Divider(height: 24),
             ],
-            Text('Resumo', style: Theme.of(context).textTheme.titleLarge),
-            const SizedBox(height: 8),
-            _row('Custo por unidade', formatBrl(r.unitCostCents)),
-            _row('Preço sugerido', formatBrl(r.unitPriceCents)),
-            _row('Total vendido', formatBrl(r.totalRevenueCents)),
-            _row('Lucro', formatBrl(r.profitCents)),
+            if (r != null) ...[
+              Text('Resumo', style: Theme.of(context).textTheme.titleLarge),
+              const SizedBox(height: 8),
+              _row('Custo por unidade', formatBrl(r!.unitCostCents)),
+              _row('Preço sugerido', formatBrl(r!.unitPriceCents)),
+              _row('Total vendido', formatBrl(r!.totalRevenueCents)),
+              _row('Lucro', formatBrl(r!.profitCents)),
+            ],
+            if (costs != null) ...[
+              if (r != null) const Divider(height: 24),
+              ..._costTable(context, costs!),
+            ],
           ],
         ),
       ),
     );
+  }
+
+  /// Tabela de custo de producao do lote e o resultado por unidade.
+  List<Widget> _costTable(BuildContext context, CostBreakdown t) {
+    final muted = Theme.of(context).textTheme.bodySmall?.copyWith(
+        color: Theme.of(context).colorScheme.onSurfaceVariant);
+    String detail(MaterialCost m) {
+      final used = m.used != null ? 'usa ${speakMeasure(m.used!)}' : '';
+      final paid = m.priceCents != null && m.pack != null
+          ? 'paga ${formatBrl(m.priceCents!)} por ${speakMeasure(m.pack!)}'
+          : '';
+      return [used, paid].where((s) => s.isNotEmpty).join(' · ');
+    }
+
+    Widget item(String name, String? sub, int cents) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 3),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(name, style: const TextStyle(fontSize: 16)),
+                    if (sub != null && sub.isNotEmpty) Text(sub, style: muted),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(formatBrl(cents)),
+            ],
+          ),
+        );
+
+    return [
+      Text('Custo de produção do lote', style: Theme.of(context).textTheme.titleLarge),
+      if (t.batchYield != null) Text('Lote de ${t.batchYield} unidades', style: muted),
+      const SizedBox(height: 8),
+      for (final m in t.materials)
+        if (m.costCents != null) item(m.name, detail(m), m.costCents!),
+      if (t.packagingCents > 0)
+        item('Embalagens', '${formatBrl(t.packagingPerUnitCents!)} por unidade',
+            t.packagingCents),
+      if ((t.freightCents ?? 0) > 0) item('Frete e transporte', null, t.freightCents!),
+      if ((t.wearCents ?? 0) > 0)
+        item('Gás, energia e desgaste', null, t.wearCents!),
+      if ((t.laborCents ?? 0) > 0)
+        item(
+            'Pró-labore',
+            t.laborHourlyCents != null
+                ? '${formatBrl(t.laborHourlyCents!)} por hora'
+                : null,
+            t.laborCents!),
+      if ((t.otherCents ?? 0) > 0) item('Outros custos', null, t.otherCents!),
+      const Divider(height: 16),
+      _row('Custo do lote', formatBrl(t.batchCents)),
+      if (t.unitCostCents != null) _row('Custo por unidade', formatBrl(t.unitCostCents!)),
+      if (t.unitPriceCents != null)
+        _row('Preço sugerido (margem ${t.marginPercent}%)', formatBrl(t.unitPriceCents!)),
+      if (t.unitProfitCents != null) _row('Lucro por unidade', formatBrl(t.unitProfitCents!)),
+    ];
   }
 
   /// Linha de texto livre: rotulo em cima, valor embaixo (valores podem ser longos).

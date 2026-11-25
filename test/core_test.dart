@@ -164,7 +164,7 @@ void main() {
       expect(m.handle('cento e vinte reais').state, DialogState.askMargin);
       expect(m.handle('trinta').state, DialogState.confirm);
       final r = m.handle('sim');
-      expect(r.state, DialogState.result);
+      expect(r.state, DialogState.offerDetail); // resultado + "quer detalhar o custo?"
       expect(r.result!.unitPriceCents, 858);
 
       final s = m.session;

@@ -1,3 +1,4 @@
+import 'cost_breakdown.dart';
 import 'pricing_calculator.dart';
 import 'pt_br_parser.dart';
 
@@ -17,6 +18,12 @@ enum DialogState {
   askMargin,
   confirm,
   result,
+
+  /// Depois do resultado: "quer detalhar o custo de producao do lote?".
+  offerDetail,
+
+  /// Entrevista do custo detalhado (materiais, embalagem, frete, pro-labore...).
+  costDetail,
 }
 
 /// Ordem linear das perguntas (usada por "voltar" e pelas correcoes).
@@ -58,6 +65,7 @@ class SalesSession {
     this.quantity,
     this.totalCostCents,
     this.marginPercent,
+    this.costs,
   });
 
   // Triagem (opcionais, exceto o produto).
@@ -72,6 +80,9 @@ class SalesSession {
   final int? quantity;
   final int? totalCostCents;
   final int? marginPercent;
+
+  /// Tabela de custo de producao do lote (custo detalhado). Faz parte do cadastro.
+  final CostBreakdown? costs;
 
   bool get hasSpecs =>
       materials != null ||
@@ -115,6 +126,20 @@ class SalesSession {
         quantity: field == DialogState.askQuantity ? value as int? : quantity,
         totalCostCents: field == DialogState.askCost ? value as int? : totalCostCents,
         marginPercent: field == DialogState.askMargin ? value as int? : marginPercent,
+        costs: costs,
+      );
+
+  SalesSession withCosts(CostBreakdown? table) => SalesSession(
+        company: company,
+        product: product,
+        materials: materials,
+        batchYield: table?.batchYield ?? batchYield,
+        productionMinutes: productionMinutes,
+        characteristics: characteristics,
+        quantity: quantity,
+        totalCostCents: totalCostCents,
+        marginPercent: marginPercent,
+        costs: table,
       );
 
   /// Cadastro completo: a triagem ja foi feita (o produto e obrigatorio).
@@ -128,6 +153,7 @@ class SalesSession {
         batchYield: batchYield,
         productionMinutes: productionMinutes,
         characteristics: characteristics,
+        costs: costs,
       );
 
   Map<String, Object?> toJson() => {
@@ -140,6 +166,7 @@ class SalesSession {
         'quantity': quantity,
         'totalCostCents': totalCostCents,
         'marginPercent': marginPercent,
+        'costs': costs?.toJson(),
       };
 
   static SalesSession fromJson(Map<String, Object?> j) => SalesSession(
@@ -152,12 +179,13 @@ class SalesSession {
         quantity: (j['quantity'] as num?)?.toInt(),
         totalCostCents: (j['totalCostCents'] as num?)?.toInt(),
         marginPercent: (j['marginPercent'] as num?)?.toInt(),
+        costs: CostBreakdown.fromJson(j['costs']),
       );
 }
 
 class DialogResponse {
   const DialogResponse(this.text, this.state,
-      {this.result, this.understood = true});
+      {this.result, this.breakdown, this.understood = true});
 
   /// Texto exibido E falado.
   final String text;
@@ -165,6 +193,9 @@ class DialogResponse {
 
   /// Preenchido apenas no estado [DialogState.result].
   final PricingResult? result;
+
+  /// Preenchido ao terminar o custo detalhado (tabela para a tela).
+  final CostBreakdown? breakdown;
 
   /// false quando a fala nao pode ser interpretada no estado atual (pedido de repeticao).
   /// A camada de LLM local usa isso para tentar uma segunda interpretacao.
@@ -262,6 +293,13 @@ class DialogMachine {
   /// Depois de corrigir uma resposta antiga, volta para esta pergunta.
   DialogState? _resumeTo;
 
+  /// Entrevista do custo detalhado em andamento ([DialogState.costDetail]).
+  CostInterview? _interview;
+
+  static const _offerText = 'Quer detalhar o custo de produção do lote? Eu monto uma '
+      'tabela com cada material, embalagem, frete e o seu pró-labore, e calculo quanto '
+      'custa produzir cada unidade.';
+
   DialogState get state => _state;
   SalesSession get session => _session;
   String get lastPrompt => _lastPrompt;
@@ -273,6 +311,7 @@ class DialogMachine {
   DialogResponse start() {
     _resumeTo = null;
     _correctingOld = null;
+    _interview = null;
     final p = profile;
     if (p.hasProfile) {
       _session = p.keepTriage();
@@ -290,6 +329,9 @@ class DialogMachine {
   DialogResponse handle(String input) {
     final cmd = parseCommand(input);
     if (cmd != null) return _command(cmd);
+
+    // Na entrevista de custo, frases como "o frete custa 20" nao sao correcoes.
+    if (_state == DialogState.costDetail) return _answer(input);
 
     final fix = parseCorrection(input);
     if (fix != null) {
@@ -312,6 +354,10 @@ class DialogMachine {
 
   DialogResponse _answer(String input) {
     final skip = isSkip(input);
+    if (_state == DialogState.result &&
+        RegExp(r'\b(detalhar|detalhe|tabela)\b').hasMatch(normalizePt(input))) {
+      return _startInterview();
+    }
     switch (_state) {
       case DialogState.confirm:
         final yn = parseYesNo(input);
@@ -326,8 +372,25 @@ class DialogMachine {
         return _retry('Responda sim para continuar ou não para corrigir.');
 
       case DialogState.result:
-        return _say('Para calcular de novo com outros números, diga: recomeçar. Para mudar '
-            'uma resposta, diga, por exemplo: corrigir o custo.');
+        return _say('Para calcular de novo com outros números, diga: recomeçar. Para '
+            'detalhar o custo de produção, diga: detalhar custo. Para mudar uma resposta, '
+            'diga, por exemplo: corrigir o custo.');
+
+      case DialogState.offerDetail:
+        final yn = parseYesNo(input);
+        if (yn == YesNo.yes) return _startInterview();
+        if (yn == YesNo.no || isSkip(input)) {
+          return _goto(DialogState.result, 'Tudo bem. Se quiser detalhar depois, diga: '
+              'detalhar custo. Para calcular de novo, diga: recomeçar.');
+        }
+        return _retry('Responda sim para detalhar o custo, ou não para terminar.');
+
+      case DialogState.costDetail:
+        final it = _interview!;
+        final r = it.answer(input);
+        if (!r.ok) return _retry(r.text);
+        if (!it.done) return _say(r.text);
+        return _finishInterview(r.text);
 
       default:
         final field = _state;
@@ -396,6 +459,8 @@ class DialogMachine {
             : _Parsed(v);
       case DialogState.confirm:
       case DialogState.result:
+      case DialogState.offerDetail:
+      case DialogState.costDetail:
         return const _Parsed.error('');
     }
   }
@@ -422,6 +487,8 @@ class DialogMachine {
       case DialogState.askMargin:
       case DialogState.confirm:
       case DialogState.result:
+      case DialogState.offerDetail:
+      case DialogState.costDetail:
         return '';
     }
   }
@@ -450,6 +517,8 @@ class DialogMachine {
         return 'Corrigido: margem de $v por cento.';
       case DialogState.confirm:
       case DialogState.result:
+      case DialogState.offerDetail:
+      case DialogState.costDetail:
         return 'Corrigido.';
     }
   }
@@ -478,7 +547,9 @@ class DialogMachine {
       return _retry('Essa informação ainda não foi respondida. ${_question(_state)}');
     }
     // Do resultado ou da confirmacao, volta para a confirmacao com os valores novos.
-    final resume = (_state == DialogState.result || _state == DialogState.confirm)
+    final resume = (_state == DialogState.result ||
+            _state == DialogState.confirm ||
+            _state == DialogState.offerDetail)
         ? DialogState.confirm
         : (_resumeTo ?? _state);
     if (value != null) {
@@ -499,7 +570,10 @@ class DialogMachine {
   /// Da para corrigir campos ja respondidos (ou o atual).
   bool _canCorrect(DialogState field) {
     if (!correctableStates.contains(field)) return false;
-    final cur = _resumeTo ?? _state;
+    var cur = _resumeTo ?? _state;
+    if (cur == DialogState.offerDetail || cur == DialogState.costDetail) {
+      cur = DialogState.result;
+    }
     // Com cadastro pronto, toda a triagem ja foi respondida.
     if (profile.hasProfile && dialogOrder.indexOf(field) < dialogOrder.indexOf(DialogState.askQuantity)) {
       return true;
@@ -571,6 +645,10 @@ class DialogMachine {
         return _confirmationText();
       case DialogState.result:
         return _lastPrompt;
+      case DialogState.offerDetail:
+        return _offerText;
+      case DialogState.costDetail:
+        return _interview?.question() ?? _offerText;
     }
   }
 
@@ -592,8 +670,11 @@ class DialogMachine {
   DialogResponse _command(Command cmd) {
     switch (cmd) {
       case Command.repeat:
+        final showResult =
+            _state == DialogState.result || _state == DialogState.offerDetail;
         return DialogResponse(_lastPrompt, _state,
-            result: _state == DialogState.result ? _currentResult() : null);
+            result: showResult && _session.quantity != null ? _currentResult() : null,
+            breakdown: _state == DialogState.result ? _session.costs : null);
       case Command.restart:
         return start();
       case Command.back:
@@ -607,6 +688,13 @@ class DialogMachine {
 
   DialogResponse _back() {
     _resumeTo = null;
+    if (_state == DialogState.costDetail) {
+      if (_interview!.back()) return _say(_interview!.question());
+      return _goto(DialogState.offerDetail, _offerText);
+    }
+    if (_state == DialogState.offerDetail) {
+      return _goto(DialogState.confirm, _confirmationText());
+    }
     final i = dialogOrder.indexOf(_state);
     if (i <= 0) return _say('Já estamos no começo. ${_question(_state)}');
     final prev = dialogOrder[i - 1];
@@ -628,14 +716,42 @@ class DialogMachine {
 
   DialogResponse _finish() {
     final r = _currentResult();
-    _state = DialogState.result;
+    _state = DialogState.offerDetail;
     final text = 'Para ${r.input.quantity} ${_session.product}, cada unidade custa '
         '${speakBrl(r.unitCostCents)}. Cobre ${speakBrl(r.unitPriceCents)} por unidade. '
         'Vendendo tudo, você recebe ${speakBrl(r.totalRevenueCents)} e fica com '
         '${speakBrl(r.profitCents)} de lucro. '
-        'Esse cálculo considera só os custos que você informou.';
+        'Esse cálculo considera só os custos que você informou. $_offerText';
     _lastPrompt = text;
     return DialogResponse(text, _state, result: r);
+  }
+
+  /// Comeca a entrevista do custo detalhado (materiais do cadastro ja viram linhas).
+  DialogResponse _startInterview() {
+    final s = _session;
+    if (s.marginPercent == null) {
+      return _retry('Primeiro preciso da margem de lucro. ${_question(_state)}');
+    }
+    _interview = CostInterview(
+      materials: splitMaterials(s.materials),
+      batchYield: s.batchYield,
+      productionMinutes: s.productionMinutes,
+      marginPercent: s.marginPercent!,
+    );
+    return _goto(DialogState.costDetail,
+        'Vamos montar a tabela de custo de um lote. ${_interview!.question()}');
+  }
+
+  /// Fim da entrevista: guarda a tabela no cadastro e mostra o custo por unidade.
+  DialogResponse _finishInterview(String ack) {
+    final table = _interview!.table;
+    _interview = null;
+    _session = _session.withCosts(table);
+    profile = _session.keepTriage();
+    _state = DialogState.result;
+    final text = '${ack.isEmpty ? '' : '$ack '}${speakBreakdown(table)}';
+    _lastPrompt = text;
+    return DialogResponse(text, _state, breakdown: table);
   }
 
   DialogResponse _goto(DialogState s, String text) {
@@ -660,6 +776,7 @@ class DialogMachine {
         'lastPrompt': _lastPrompt,
         'resumeTo': _resumeTo?.name,
         'correctingOld': _correctingOld,
+        'interview': _interview?.toJson(),
       };
 
   /// Restaura um snapshot salvo. Retorna false se o snapshot for invalido.
@@ -675,7 +792,10 @@ class DialogMachine {
               session.marginPercent == null)) {
         return false;
       }
-      if (state == DialogState.result) return false;
+      if (state == DialogState.result || state == DialogState.offerDetail) return false;
+      final interview = CostInterview.fromJson(j['interview']);
+      if (state == DialogState.costDetail && interview == null) return false;
+      _interview = interview;
       _state = state;
       _session = session;
       _lastPrompt = j['lastPrompt'] as String? ?? '';

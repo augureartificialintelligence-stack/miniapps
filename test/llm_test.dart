@@ -126,7 +126,7 @@ void main() {
       await d.handle('50 reais');
       await d.handle('20');
       final r = await d.handle('pode seguir, ta tudo certinho'); // "pode" ja e sim
-      expect(r.state, DialogState.result);
+      expect(r.state, DialogState.offerDetail); // resultado + "quer detalhar o custo?"
       expect(llm.prompts, isEmpty);
 
       final d2 = build(FakeLlm(['{"answer": "nao"}']));

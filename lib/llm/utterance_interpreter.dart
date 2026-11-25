@@ -68,6 +68,8 @@ class UtteranceInterpreter {
       case DialogState.askCompany:
       case DialogState.askMaterials:
       case DialogState.askCharacteristics:
+      // Entrevista de custo: parsers proprios (quantidades e precos).
+      case DialogState.costDetail:
         return null;
       case DialogState.askBatchYield:
         return _Spec(
@@ -140,6 +142,7 @@ class UtteranceInterpreter {
             return v is num && v == v.roundToDouble() ? '${v.toInt()}' : null;
           },
         );
+      case DialogState.offerDetail:
       case DialogState.confirm:
         return _Spec(
           schema: _obj({
