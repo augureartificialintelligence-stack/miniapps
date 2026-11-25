@@ -15,6 +15,8 @@ dependencies:
   # Voz via sistema operacional (fallback offline quando o pacote de idioma esta instalado).
   speech_to_text: ^7.0.0
   flutter_tts: ^4.2.0
+  # Memoria local (conversa, fichas de produto, exemplos de aprendizado).
+  path_provider: ^2.1.5
   # Fase 2: LLM local (GGUF via llama.cpp). Atualizar os pacotes flutter_edge_ai_* juntos.
   # (flutter_gemma foi renomeado para flutter_edge_ai.)
   flutter_edge_ai: ^2.7.1

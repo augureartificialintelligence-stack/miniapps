@@ -224,9 +224,14 @@ void main() {
       expect(m.handle('voltar').state, DialogState.askQuantity);
       expect(m.handle('voltar').state, DialogState.askCharacteristics);
       expect(m.handle('repetir').state, DialogState.askCharacteristics);
-      expect(m.handle('recomeçar').state, DialogState.askCompany);
-      expect(m.session.product, isNull);
-      expect(m.session.company, isNull);
+      // Cadastro ja existe: recomecar zera o preco, nao a triagem.
+      expect(m.handle('recomeçar').state, DialogState.askQuantity);
+      expect(m.session.product, 'marmitas');
+
+      // Sem cadastro (produto nao respondido), recomecar volta ao inicio.
+      final fresh = DialogMachine()..start();
+      fresh.handle('Doces da Ana');
+      expect(fresh.handle('recomeçar').state, DialogState.askCompany);
     });
 
     test('nao na confirmacao corrige so os numeros e mantem a triagem', () {
@@ -241,16 +246,46 @@ void main() {
       expect(m.session.quantity, isNull);
     });
 
-    test('outro produto mantem a empresa', () {
+    test('triagem vira o cadastro do usuario (um produto)', () {
+      final m = DialogMachine()..start();
+      triage(m);
+      expect(m.profile.company, 'Doces da Ana');
+      expect(m.profile.product, 'marmitas');
+      expect(m.profile.batchYield, 20);
+      expect(m.profile.quantity, isNull); // numeros do preco nao entram no cadastro
+    });
+
+    test('com cadastro, a conversa pula a triagem e vai ao preco', () {
+      final m = DialogMachine()..start();
+      triage(m);
+      final again = DialogMachine(profile: m.profile);
+      final r = again.start();
+      expect(r.state, DialogState.askQuantity);
+      expect(r.text, contains('Oi de novo, Doces da Ana'));
+      expect(r.text, contains('marmitas'));
+      expect(again.handle('um lote').state, DialogState.askCost); // usa o rendimento salvo
+      expect(again.session.quantity, 20);
+    });
+
+    test('com cadastro, da para corrigir a triagem e voltar ao preco', () {
+      final m = DialogMachine()..start();
+      triage(m);
+      final again = DialogMachine(profile: m.profile)..start();
+      expect(again.handle('corrigir o tempo').state, DialogState.askProductionTime);
+      expect(again.handle('três horas').state, DialogState.askQuantity);
+      expect(again.profile.productionMinutes, 180);
+    });
+
+    test('recomecar depois do resultado recalcula o mesmo produto', () {
       final m = DialogMachine()..start();
       triage(m);
       m.handle('10');
       m.handle('50 reais');
       m.handle('20');
       m.handle('sim');
-      expect(m.handle('outro produto').state, DialogState.askProduct);
-      expect(m.session.company, 'Doces da Ana');
-      expect(m.session.product, isNull);
+      expect(m.handle('recomeçar').state, DialogState.askQuantity);
+      expect(m.session.product, 'marmitas');
+      expect(m.session.quantity, isNull);
     });
 
     test('margem fora da faixa e rejeitada', () {

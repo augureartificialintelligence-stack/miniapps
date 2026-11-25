@@ -134,8 +134,20 @@ void main() {
       await d2.handle('10');
       await d2.handle('50 reais');
       await d2.handle('20');
-      final r2 = await d2.handle('hmm, acho que o custo tava errado');
-      expect(r2.state, DialogState.askQuantity); // corrige so os numeros
+      final r2 = await d2.handle('hmm, deixa eu pensar melhor');
+      expect(r2.state, DialogState.askQuantity); // LLM disse "nao": corrige os numeros
+
+      // Falar QUAL dado esta errado vai direto nele (sem LLM) e volta para a confirmacao.
+      final llm3 = FakeLlm([]);
+      final d3 = build(llm3);
+      await triage(d3);
+      await d3.handle('10');
+      await d3.handle('50 reais');
+      await d3.handle('20');
+      final r3 = await d3.handle('hmm, acho que o custo tava errado');
+      expect(r3.state, DialogState.askCost);
+      expect((await d3.handle('60 reais')).state, DialogState.confirm);
+      expect(llm3.prompts, isEmpty);
     });
   });
 }

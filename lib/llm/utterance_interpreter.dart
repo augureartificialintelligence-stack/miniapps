@@ -7,10 +7,17 @@ import 'llm_engine.dart';
 /// (ex.: "20", "120,50 reais", "sim") que a [DialogMachine] entende pelos parsers
 /// deterministicos. Toda saida do LLM e re-validada pela maquina (faixas, tipos), e o
 /// usuario ainda ouve a leitura dos valores na etapa de confirmacao.
+///
+/// Com [context], o prompt leva o cadastro do usuario e as falas parecidas que ja foram
+/// entendidas nesta pergunta (recuperadas da memoria local). E aprendizado em contexto:
+/// o modelo nao e re-treinado, mas recebe os acertos e correcoes anteriores.
 class UtteranceInterpreter {
-  UtteranceInterpreter(this._llm);
+  UtteranceInterpreter(this._llm, {this.context});
 
   final LlmEngine _llm;
+
+  /// Memoria local (cadastro + exemplos). Opcional.
+  final InterpreterContext? context;
 
   /// Retorna a frase canonica ou null se o LLM nao souber/falhar.
   Future<String?> interpret(String utterance, DialogState state) async {
@@ -19,7 +26,7 @@ class UtteranceInterpreter {
     if (spec == null) return null;
     try {
       final raw = await _llm.complete(
-        spec.prompt(utterance.trim()),
+        _buildPrompt(spec, utterance.trim(), state),
         jsonSchema: spec.schema,
       );
       final json = _extractJson(raw);
@@ -28,6 +35,27 @@ class UtteranceInterpreter {
     } catch (_) {
       return null; // qualquer falha do LLM cai de volta no fluxo deterministico
     }
+  }
+
+  /// Prompt = contexto do cadastro + exemplos recuperados + pergunta da etapa.
+  String _buildPrompt(_Spec spec, String utterance, DialogState state) {
+    final b = StringBuffer();
+    final profile = context?.profileSummary();
+    if (profile != null && profile.isNotEmpty) {
+      b.writeln('Cadastro do usuario (use so para entender a fala; nao copie valores '
+          'dele para a resposta): $profile');
+    }
+    final shots = spec.example == null
+        ? const <FewShot>[]
+        : context?.examplesFor(state, utterance) ?? const <FewShot>[];
+    if (shots.isNotEmpty) {
+      b.writeln('Exemplos ja confirmados por este usuario:');
+      for (final s in shots) {
+        b.writeln('Fala: "${s.input}" -> ${jsonEncode(spec.example!(s.value))}');
+      }
+    }
+    b.write(spec.prompt(utterance));
+    return b.toString();
   }
 
   static const _rules =
@@ -44,6 +72,7 @@ class UtteranceInterpreter {
       case DialogState.askBatchYield:
         return _Spec(
           schema: _obj({'units': _t(['integer', 'null'])}),
+          example: (v) => {'units': _int(v)},
           prompt: (u) => 'Extraia quantas unidades rende UMA producao/lote (numero '
               'inteiro). $_rules\nFala: "$u"\nFormato: {"units": 20}',
           canonical: (j) {
@@ -54,6 +83,7 @@ class UtteranceInterpreter {
       case DialogState.askProductionTime:
         return _Spec(
           schema: _obj({'minutes': _t(['integer', 'null'])}),
+          example: (v) => {'minutes': _int(v)},
           prompt: (u) => 'Extraia o tempo para produzir um lote, convertido em MINUTOS '
               '(numero inteiro). $_rules\nFala: "$u"\nFormato: {"minutes": 90}',
           canonical: (j) {
@@ -64,6 +94,7 @@ class UtteranceInterpreter {
       case DialogState.askProduct:
         return _Spec(
           schema: _obj({'product': _t(['string', 'null'])}),
+          example: (v) => {'product': '$v'},
           prompt: (u) => 'Extraia o nome do produto que a pessoa quer vender. $_rules\n'
               'Fala: "$u"\nFormato: {"product": "nome curto"}',
           canonical: (j) {
@@ -74,6 +105,7 @@ class UtteranceInterpreter {
       case DialogState.askQuantity:
         return _Spec(
           schema: _obj({'quantity': _t(['integer', 'null'])}),
+          example: (v) => {'quantity': _int(v)},
           prompt: (u) => 'Extraia a quantidade de unidades (numero inteiro). $_rules\n'
               'Fala: "$u"\nFormato: {"quantity": 20}',
           canonical: (j) {
@@ -84,6 +116,7 @@ class UtteranceInterpreter {
       case DialogState.askCost:
         return _Spec(
           schema: _obj({'reais': _t(['number', 'null'])}),
+          example: (v) => {'reais': (_int(v) ?? 0) / 100}, // valor salvo em centavos
           prompt: (u) =>
               'Extraia o valor TOTAL em reais (pode ter centavos, ex.: 12.5). $_rules\n'
               'Fala: "$u"\nFormato: {"reais": 120.5}',
@@ -98,6 +131,7 @@ class UtteranceInterpreter {
       case DialogState.askMargin:
         return _Spec(
           schema: _obj({'percent': _t(['integer', 'null'])}),
+          example: (v) => {'percent': _int(v)},
           prompt: (u) =>
               'Extraia a porcentagem de lucro desejada (numero inteiro, sem o simbolo). '
               '$_rules\nFala: "$u"\nFormato: {"percent": 30}',
@@ -128,6 +162,8 @@ class UtteranceInterpreter {
     }
   }
 
+  static int? _int(Object? v) => v is num ? v.toInt() : int.tryParse('$v');
+
   static Map<String, Object?> _t(List<String> types) => {'type': types};
 
   static Map<String, Object?> _obj(Map<String, Object?> props) => {
@@ -152,8 +188,32 @@ class UtteranceInterpreter {
 }
 
 class _Spec {
-  _Spec({required this.schema, required this.prompt, required this.canonical});
+  _Spec({
+    required this.schema,
+    required this.prompt,
+    required this.canonical,
+    this.example,
+  });
   final Map<String, Object?> schema;
   final String Function(String utterance) prompt;
   final String? Function(Map<String, Object?> json) canonical;
+
+  /// Valor salvo -> JSON de resposta, para montar exemplos (few-shot). null = sem exemplos.
+  final Map<String, Object?> Function(Object value)? example;
+}
+
+/// Exemplo recuperado da memoria: fala real do usuario -> valor aceito.
+class FewShot {
+  const FewShot(this.input, this.value);
+  final String input;
+  final Object value;
+}
+
+/// Contexto local entregue ao LLM (implementado pela memoria do app).
+abstract class InterpreterContext {
+  /// Resumo do cadastro (empresa, produto, especificacoes), ou null.
+  String? profileSummary();
+
+  /// Falas parecidas ja entendidas nesta pergunta.
+  List<FewShot> examplesFor(DialogState state, String utterance, {int k = 3});
 }

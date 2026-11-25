@@ -5,12 +5,28 @@ import '../core/pricing_calculator.dart';
 import '../core/pt_br_parser.dart' show speakDuration;
 import '../llm/llm_engine.dart';
 import '../llm/smart_dialog.dart';
+import '../memory/conversation_store.dart';
 import '../voice/voice_engines.dart';
 
 class ChatMessage {
-  ChatMessage(this.text, {required this.fromAssistant});
+  ChatMessage(this.text, {required this.fromAssistant, this.answered});
   final String text;
   final bool fromAssistant;
+
+  /// Para respostas do usuario: a pergunta que esta mensagem respondeu (permite corrigir).
+  final DialogState? answered;
+
+  Map<String, Object?> toJson() =>
+      {'text': text, 'fromAssistant': fromAssistant, 'answered': answered?.name};
+
+  static ChatMessage? fromJson(Map<String, Object?> j) {
+    final text = j['text'];
+    if (text is! String) return null;
+    final a = j['answered'] as String?;
+    return ChatMessage(text,
+        fromAssistant: j['fromAssistant'] == true,
+        answered: a == null ? null : DialogState.values.asNameMap()[a]);
+  }
 }
 
 /// Tela unica: botao grande de falar, alternativa de digitar, leitura em voz alta e
@@ -22,11 +38,16 @@ class VoiceScreen extends StatefulWidget {
     required this.tts,
     required this.dialog,
     this.llm,
+    this.store,
   });
 
   final SttEngine stt;
   final TtsEngine tts;
   final SmartDialog dialog;
+
+  /// Memoria local (retomar conversa, empresa, fichas). Sem ela, o app funciona igual,
+  /// so nao lembra nada entre aberturas.
+  final ConversationStore? store;
 
   /// LLM local opcional. Sem ele (ou antes do download) o app usa so o fluxo deterministico.
   final InstallableLlm? llm;
@@ -59,7 +80,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
     final ok = await widget.stt.init();
     if (!mounted) return;
     setState(() => _sttAvailable = ok);
-    _assistantSays(widget.dialog.start());
+    _assistantSays(_resumeOrStart());
     // Carrega o modelo se ja foi baixado antes (silencioso; falha = sem LLM).
     final llm = widget.llm;
     if (llm != null) {
@@ -92,12 +113,24 @@ class _VoiceScreenState extends State<VoiceScreen> {
     });
   }
 
+  /// Retoma a conversa salva (se recente) ou comeca uma nova.
+  DialogResponse _resumeOrStart() {
+    final saved = widget.store?.resumable();
+    if (saved != null && widget.dialog.machine.restore(saved.dialog)) {
+      final old = saved.messages.map(ChatMessage.fromJson).whereType<ChatMessage>();
+      setState(() => _messages.addAll(old));
+      return widget.dialog.machine.resumePrompt();
+    }
+    return widget.dialog.start();
+  }
+
   void _assistantSays(DialogResponse r) {
     _addMessage(ChatMessage(r.text, fromAssistant: true));
+    final machine = widget.dialog.machine;
     setState(() {
       if (r.result != null) {
         _lastResult = r.result;
-        _lastSession = widget.dialog.machine.session;
+        _lastSession = machine.session;
       } else if (r.state != DialogState.result) {
         // Novo calculo em andamento: o resumo antigo sai da tela.
         _lastResult = null;
@@ -105,12 +138,54 @@ class _VoiceScreenState extends State<VoiceScreen> {
       }
     });
     widget.tts.speak(r.text);
+    _persist(r);
+  }
+
+  /// Salva a conversa (para retomar) e, no resultado, a ficha do produto.
+  Future<void> _persist(DialogResponse r) async {
+    final store = widget.store;
+    if (store == null) return;
+    final machine = widget.dialog.machine;
+    await store.saveProfile(machine.profile);
+    if (r.result != null) await store.rememberResult(machine.session, r.result!);
+    await store.saveConversation(
+        machine.toJson(), [for (final m in _messages) m.toJson()]);
+  }
+
+  /// Lapis numa resposta antiga: volta para aquela pergunta e depois continua de onde
+  /// estava. O texto antigo vai para o campo, para editar se quiser.
+  void _correctAnswer(ChatMessage m) {
+    final field = m.answered;
+    if (field == null || _busy) return;
+    widget.tts.stop();
+    _assistantSays(widget.dialog.machine.correct(field));
+    setState(() {
+      _pendingTranscript = null;
+      _textCtrl.text = m.text;
+    });
+  }
+
+  /// Comeca do zero (mantem empresa e fichas salvas).
+  void _newConversation() {
+    if (_busy) return;
+    widget.tts.stop();
+    setState(() {
+      _messages.clear();
+      _pendingTranscript = null;
+      _lastResult = null;
+      _lastSession = null;
+      _textCtrl.clear();
+    });
+    _assistantSays(widget.dialog.start());
   }
 
   Future<void> _submit(String text) async {
     final t = text.trim();
     if (t.isEmpty || _busy) return;
-    _addMessage(ChatMessage(t, fromAssistant: false));
+    final state = widget.dialog.machine.state;
+    _addMessage(ChatMessage(t,
+        fromAssistant: false,
+        answered: correctableStates.contains(state) ? state : null));
     setState(() => _busy = true);
     try {
       final r = await widget.dialog.handle(t);
@@ -206,6 +281,21 @@ class _VoiceScreenState extends State<VoiceScreen> {
     setState(() => _pendingTranscript = null);
   }
 
+  /// Nome curto da pergunta atual (mostra a quem o texto ouvido vai responder).
+  static String _questionLabel(DialogState s) => switch (s) {
+        DialogState.askCompany => 'nome da empresa',
+        DialogState.askProduct => 'produto',
+        DialogState.askMaterials => 'materiais ou ingredientes',
+        DialogState.askBatchYield => 'rendimento por lote',
+        DialogState.askProductionTime => 'tempo de produção',
+        DialogState.askCharacteristics => 'características',
+        DialogState.askQuantity => 'quantidade',
+        DialogState.askCost => 'custo total',
+        DialogState.askMargin => 'margem',
+        DialogState.confirm => 'confirmação',
+        DialogState.result => 'próximo passo',
+      };
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -224,6 +314,13 @@ class _VoiceScreenState extends State<VoiceScreen> {
                       ?.copyWith(color: scheme.onSurfaceVariant)),
           ],
         ),
+        actions: [
+          IconButton(
+            tooltip: 'Nova conversa',
+            onPressed: _busy ? null : _newConversation,
+            icon: const Icon(Icons.add_comment_outlined),
+          ),
+        ],
       ),
       body: SafeArea(
         child: Column(
@@ -238,7 +335,11 @@ class _VoiceScreenState extends State<VoiceScreen> {
                   if (i == _messages.length) {
                     return _ResultCard(_lastResult!, _lastSession);
                   }
-                  return _Bubble(_messages[i]);
+                  final m = _messages[i];
+                  return _Bubble(m,
+                      onCorrect: m.answered != null && !_busy
+                          ? () => _correctAnswer(m)
+                          : null);
                 },
               ),
             ),
@@ -254,6 +355,10 @@ class _VoiceScreenState extends State<VoiceScreen> {
                       children: [
                         Text('Entendi: "$_pendingTranscript"',
                             style: Theme.of(context).textTheme.titleMedium),
+                        const SizedBox(height: 4),
+                        Text(
+                            'Isso responde: ${_questionLabel(widget.dialog.machine.state)}',
+                            style: Theme.of(context).textTheme.bodySmall),
                         const SizedBox(height: 8),
                         Row(children: [
                           Expanded(
@@ -265,9 +370,13 @@ class _VoiceScreenState extends State<VoiceScreen> {
                           Expanded(
                             child: OutlinedButton(
                                 onPressed: _correctTranscript,
-                                child: const Text('Corrigir')),
+                                child: const Text('Editar texto')),
                           ),
                         ]),
+                        const SizedBox(height: 4),
+                        Text(
+                            'Para mudar uma resposta anterior, toque no lápis ao lado dela.',
+                            style: Theme.of(context).textTheme.bodySmall),
                       ],
                     ),
                   ),
@@ -329,24 +438,37 @@ class _VoiceScreenState extends State<VoiceScreen> {
 }
 
 class _Bubble extends StatelessWidget {
-  const _Bubble(this.m);
+  const _Bubble(this.m, {this.onCorrect});
   final ChatMessage m;
+
+  /// Lapis para corrigir esta resposta (so em respostas do usuario).
+  final VoidCallback? onCorrect;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Align(
-      alignment: m.fromAssistant ? Alignment.centerLeft : Alignment.centerRight,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.all(12),
-        constraints: const BoxConstraints(maxWidth: 320),
-        decoration: BoxDecoration(
-          color: m.fromAssistant ? scheme.surfaceContainerHighest : scheme.primaryContainer,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Text(m.text, style: const TextStyle(fontSize: 18)),
+    final bubble = Container(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.all(12),
+      constraints: const BoxConstraints(maxWidth: 300),
+      decoration: BoxDecoration(
+        color: m.fromAssistant ? scheme.surfaceContainerHighest : scheme.primaryContainer,
+        borderRadius: BorderRadius.circular(16),
       ),
+      child: Text(m.text, style: const TextStyle(fontSize: 18)),
+    );
+    if (m.fromAssistant) return Align(alignment: Alignment.centerLeft, child: bubble);
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.end,
+      children: [
+        if (onCorrect != null)
+          IconButton(
+            tooltip: 'Corrigir esta resposta',
+            onPressed: onCorrect,
+            icon: Icon(Icons.edit_outlined, color: scheme.onSurfaceVariant),
+          ),
+        Flexible(child: bubble),
+      ],
     );
   }
 }
