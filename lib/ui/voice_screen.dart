@@ -167,6 +167,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
   void _correctAnswer(ChatMessage m) {
     final field = m.answered;
     if (field == null || _busy) return;
+    _cancelListening();
     widget.tts.stop();
     _assistantSays(widget.dialog.machine.correct(field));
     setState(() {
@@ -178,6 +179,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
   /// Comeca do zero (mantem empresa e fichas salvas).
   void _newConversation() {
     if (_busy) return;
+    _cancelListening();
     widget.tts.stop();
     setState(() {
       _messages.clear();
@@ -193,6 +195,8 @@ class _VoiceScreenState extends State<VoiceScreen> {
   Future<void> _submit(String text) async {
     final t = text.trim();
     if (t.isEmpty || _busy) return;
+    // Enviou com o microfone ainda ligado: desliga e descarta o resto da escuta.
+    _cancelListening();
     final state = widget.dialog.machine.state;
     _addMessage(ChatMessage(t,
         fromAssistant: false,
@@ -255,6 +259,22 @@ class _VoiceScreenState extends State<VoiceScreen> {
     );
   }
 
+  /// Muda a cada escuta nova ou cancelada: resultados atrasados de uma escuta antiga
+  /// (ex.: o microfone terminando pelo silencio DEPOIS que a resposta ja foi enviada)
+  /// sao descartados, para nao virarem resposta da pergunta seguinte.
+  int _listenGen = 0;
+
+  /// Desliga o microfone e descarta o que ele ainda entregaria.
+  void _cancelListening() {
+    if (!_listening) return;
+    _listenGen++;
+    widget.stt.stop();
+    setState(() {
+      _listening = false;
+      _pendingTranscript = null;
+    });
+  }
+
   Future<void> _toggleListen() async {
     if (_listening) {
       await widget.stt.stop();
@@ -262,12 +282,13 @@ class _VoiceScreenState extends State<VoiceScreen> {
       return;
     }
     await widget.tts.stop();
+    final gen = ++_listenGen;
     setState(() {
       _listening = true;
       _pendingTranscript = null;
     });
     await widget.stt.listen((text, isFinal) {
-      if (!mounted) return;
+      if (!mounted || gen != _listenGen) return;
       setState(() {
         _textCtrl.text = text;
         if (isFinal) {
