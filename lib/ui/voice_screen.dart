@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:image_picker/image_picker.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -87,7 +89,73 @@ class _VoiceScreenState extends State<VoiceScreen> {
 
   PricingResult? _lastResult;
 
+  /// IA local descarregada enquanto a camera/galeria esta aberta (libera ~1 GB de
+  /// memoria para o Android nao fechar o app). O aviso de "Baixar" nao aparece nesse meio.
+  bool _llmPaused = false;
+
   DialogMachine get _machine => widget.dialog.machine;
+
+  /// Conversa automatica: o microfone abre sozinho quando o assistente termina de falar,
+  /// e o texto ouvido e enviado depois de alguns segundos (da para editar antes).
+  bool _handsFree = true;
+
+  /// O assistente esta falando (toque no microfone, na pergunta ou digite para interromper).
+  bool _speaking = false;
+
+  /// Muda a cada fala nova ou interrompida: a fala antiga nao abre o microfone ao acabar.
+  int _speechGen = 0;
+
+  /// Envio automatico do texto ouvido (contagem regressiva no cartao "Entendi").
+  Timer? _autoSend;
+  int _autoSendLeft = 0;
+  static const _autoSendSeconds = 3;
+
+  /// Fala o texto. Com [autoListen] e a conversa automatica ligada, abre o microfone
+  /// quando a fala termina (se ninguem interrompeu).
+  Future<void> _speak(String text, {bool autoListen = false}) async {
+    final gen = ++_speechGen;
+    setState(() => _speaking = true);
+    await widget.tts.speak(text);
+    if (!mounted || gen != _speechGen) return; // interrompida ou substituida
+    setState(() => _speaking = false);
+    if (autoListen &&
+        _handsFree &&
+        _sttAvailable &&
+        !_listening &&
+        !_busy &&
+        _pendingTranscript == null &&
+        _textCtrl.text.trim().isEmpty &&
+        ModalRoute.of(context)?.isCurrent == true) {
+      _toggleListen();
+    }
+  }
+
+  /// Interrompe a fala do assistente (e o microfone automatico que viria depois dela).
+  void _stopSpeaking() {
+    _speechGen++;
+    widget.tts.stop();
+    if (_speaking && mounted) setState(() => _speaking = false);
+  }
+
+  void _cancelAutoSend() {
+    _autoSend?.cancel();
+    _autoSend = null;
+    if (_autoSendLeft != 0 && mounted) setState(() => _autoSendLeft = 0);
+  }
+
+  void _startAutoSend() {
+    _cancelAutoSend();
+    if (!_handsFree) return;
+    _autoSendLeft = _autoSendSeconds;
+    _autoSend = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted || _pendingTranscript == null) return _cancelAutoSend();
+      setState(() => _autoSendLeft--);
+      if (_autoSendLeft <= 0) {
+        _cancelAutoSend();
+        _confirmTranscript();
+      }
+    });
+  }
 
   @override
   void initState() {
@@ -107,12 +175,31 @@ class _VoiceScreenState extends State<VoiceScreen> {
       if (mounted) setState(() {});
     }
     if (!ok) _notice('O microfone não está disponível neste aparelho. Você pode digitar.');
+    await _recoverLostPhotos();
+  }
+
+  /// Se o Android fechou o app enquanto a camera estava aberta, a foto tirada fica
+  /// guardada pelo sistema: busca e le agora, em vez de perder a foto.
+  Future<void> _recoverLostPhotos() async {
+    final scanner = widget.scanner;
+    if (scanner == null) return;
+    try {
+      final lost = await ImagePicker().retrieveLostData();
+      final files = lost.files ?? const <XFile>[];
+      if (lost.isEmpty || files.isEmpty || !mounted) return;
+      debugPrint('[AUGURE][FOTO] recuperando  foto(s) depois que o app foi fechado');
+      await _openPhotoPage(initialPaths: [for (final f in files) f.path]);
+    } catch (e) {
+      debugPrint('[AUGURE][FOTO] sem foto para recuperar: $e');
+    }
   }
 
   @override
   void dispose() {
     widget.stt.stop();
+    _speechGen++;
     widget.tts.stop();
+    _autoSend?.cancel();
     _textCtrl.dispose();
     super.dispose();
   }
@@ -143,7 +230,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
         _lastResult = null;
       }
     });
-    widget.tts.speak(r.text);
+    _speak(r.text, autoListen: true);
     _persist(r);
   }
 
@@ -161,7 +248,8 @@ class _VoiceScreenState extends State<VoiceScreen> {
   void _correctField(DialogState field, String? current) {
     if (_busy) return;
     _cancelListening();
-    widget.tts.stop();
+    _cancelAutoSend();
+    _stopSpeaking();
     _assistantSays(_machine.correct(field));
     setState(() {
       _pendingTranscript = null;
@@ -172,7 +260,8 @@ class _VoiceScreenState extends State<VoiceScreen> {
   /// Limpa a tela e comeca a conversa com o cadastro que estiver na maquina.
   void _restartScreen() {
     _cancelListening();
-    widget.tts.stop();
+    _cancelAutoSend();
+    _stopSpeaking();
     setState(() {
       _messages.clear();
       _pendingTranscript = null;
@@ -258,6 +347,8 @@ class _VoiceScreenState extends State<VoiceScreen> {
     if (t.isEmpty || _busy) return;
     // Enviou com o microfone ainda ligado: desliga e descarta o resto da escuta.
     _cancelListening();
+    _cancelAutoSend();
+    _stopSpeaking();
     final state = _machine.state;
     _messages.add(ChatMessage(t,
         fromAssistant: false, answered: correctableStates.contains(state) ? state : null));
@@ -276,7 +367,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
     final scanner = widget.scanner;
     if (scanner == null || _busy) return;
     _cancelListening();
-    widget.tts.stop();
+    _stopSpeaking();
     final source = await showModalBottomSheet<ImageSource>(
       context: context,
       showDragHandle: true,
@@ -300,14 +391,35 @@ class _VoiceScreenState extends State<VoiceScreen> {
       ),
     );
     if (source == null || !mounted) return;
+    await _openPhotoPage(source: source);
+  }
+
+  /// Abre a tela de fotos. Descarrega a IA local antes (a camera do aparelho precisa de
+  /// memoria) e recarrega em segundo plano na volta.
+  Future<void> _openPhotoPage({ImageSource? source, List<String> initialPaths = const []}) async {
+    final scanner = widget.scanner!;
+    final llm = widget.llm;
+    final pauseLlm = llm != null && llm.isReady;
+    if (pauseLlm) {
+      setState(() => _llmPaused = true);
+      await llm.dispose();
+      debugPrint('[AUGURE][FOTO] IA local descarregada para abrir a camera');
+    }
+    if (!mounted) return;
     final result = await Navigator.push<PhotoImport>(
       context,
       MaterialPageRoute(
-        builder: (_) =>
-            PhotoImportPage(scanner: scanner, first: source, onAsk: widget.tts.speak),
+        builder: (_) => PhotoImportPage(
+            scanner: scanner, first: source, initialPaths: initialPaths, onAsk: widget.tts.speak),
       ),
     );
-    widget.tts.stop();
+    _stopSpeaking();
+    if (pauseLlm) {
+      llm.load().then((_) {
+        if (mounted) setState(() => _llmPaused = false);
+      });
+    }
+    debugPrint('[AUGURE][FOTO] fotos: ${result == null ? 'canceladas' : '${result.recipe.length} ingredientes, ${result.purchases.length} precos'}');
     if (result == null || !mounted) return;
     _messages.add(ChatMessage(
         '[fotos: ${result.recipe.length} ingredientes, ${result.purchases.length} preços]',
@@ -334,7 +446,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
 
   Widget _llmBanner(BuildContext context) {
     final llm = widget.llm;
-    if (llm == null || llm.isReady) return const SizedBox.shrink();
+    if (llm == null || llm.isReady || _llmPaused) return const SizedBox.shrink();
     final mb = (llm.approxDownloadBytes / 1000000).round();
     return Card(
       margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
@@ -381,7 +493,8 @@ class _VoiceScreenState extends State<VoiceScreen> {
       setState(() => _listening = false);
       return;
     }
-    await widget.tts.stop();
+    _stopSpeaking();
+    _cancelAutoSend();
     final gen = ++_listenGen;
     setState(() {
       _listening = true;
@@ -401,10 +514,12 @@ class _VoiceScreenState extends State<VoiceScreen> {
           _pendingTranscript = full.isEmpty ? null : full;
         }
       });
+      if (isFinal && _pendingTranscript != null) _startAutoSend();
     });
   }
 
   void _confirmTranscript() {
+    _cancelAutoSend();
     final t = _pendingTranscript;
     setState(() {
       _pendingTranscript = null;
@@ -415,13 +530,17 @@ class _VoiceScreenState extends State<VoiceScreen> {
 
   /// "Editar texto" e o "X": fecham o cartao e deixam o que foi falado na caixa de texto
   /// (nada e apagado nem enviado). Tocar no microfone de novo continua o texto.
-  void _closeTranscript() => setState(() => _pendingTranscript = null);
+  void _closeTranscript() {
+    _cancelAutoSend();
+    setState(() => _pendingTranscript = null);
+  }
 
   /// Nome curto da pergunta atual (mostra a quem o texto ouvido vai responder).
   static String _questionLabel(DialogState s) => switch (s) {
         DialogState.askCompany => 'nome da empresa',
         DialogState.askSector => 'ramo do negócio',
         DialogState.askProduct => 'produto',
+        DialogState.askReuse => 'usar os dados salvos?',
         DialogState.askMaterials => 'materiais ou ingredientes',
         DialogState.askBatchYield => 'rendimento por lote',
         DialogState.askProductionTime => 'tempo de produção',
@@ -455,6 +574,19 @@ class _VoiceScreenState extends State<VoiceScreen> {
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: _handsFree
+                ? 'Conversa automática ligada: o microfone abre sozinho'
+                : 'Conversa automática desligada: toque no microfone para falar',
+            onPressed: () {
+              setState(() => _handsFree = !_handsFree);
+              if (!_handsFree) _cancelAutoSend();
+              _notice(_handsFree
+                  ? 'Conversa automática ligada: o microfone abre quando eu terminar de falar.'
+                  : 'Conversa automática desligada: toque no microfone para falar.');
+            },
+            icon: Icon(_handsFree ? Icons.record_voice_over : Icons.voice_over_off),
+          ),
           if ((widget.store?.products.length ?? 0) > 0)
             IconButton(
               tooltip: 'Meus produtos',
@@ -480,7 +612,9 @@ class _VoiceScreenState extends State<VoiceScreen> {
                     text: _question,
                     retry: _retry,
                     busy: _busy,
-                    onReplay: () => widget.tts.speak(_question),
+                    speaking: _speaking,
+                    onReplay: () => _speak(_question),
+                    onInterrupt: _stopSpeaking,
                   ),
                   _ProfileCard(
                       session: s,
@@ -511,6 +645,12 @@ class _VoiceScreenState extends State<VoiceScreen> {
                     maxLines: 5,
                     keyboardType: TextInputType.text,
                     textInputAction: TextInputAction.send,
+                    // Comecou a digitar: o assistente para de falar e o envio automatico
+                    // do texto ouvido e cancelado (a pessoa esta editando).
+                    onChanged: (_) {
+                      if (_speaking) _stopSpeaking();
+                      if (_autoSend != null) _cancelAutoSend();
+                    },
                     onSubmitted: (v) {
                       _submit(v);
                       _textCtrl.clear();
@@ -533,6 +673,16 @@ class _VoiceScreenState extends State<VoiceScreen> {
                 ),
               ]),
             ),
+            if (_speaking && !_listening)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text('Toque no microfone para me interromper e falar.',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context)
+                        .textTheme
+                        .bodyMedium
+                        ?.copyWith(color: scheme.onSurfaceVariant)),
+              ),
             if (_listening)
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
@@ -597,6 +747,16 @@ class _VoiceScreenState extends State<VoiceScreen> {
                 const SizedBox(height: 4),
                 Text('Isso responde: ${_questionLabel(_machine.state)}',
                     style: Theme.of(context).textTheme.bodySmall),
+                if (_autoSendLeft > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                        'Enviando em $_autoSendLeft s… Toque em "Editar texto" para mudar antes.',
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(fontWeight: FontWeight.bold)),
+                  ),
                 const SizedBox(height: 8),
                 Row(children: [
                   Expanded(
@@ -618,16 +778,33 @@ class _VoiceScreenState extends State<VoiceScreen> {
 
 /// Pergunta atual do assistente, em destaque.
 class _QuestionCard extends StatelessWidget {
-  const _QuestionCard(
-      {required this.text, required this.retry, required this.busy, required this.onReplay});
+  const _QuestionCard({
+    required this.text,
+    required this.retry,
+    required this.busy,
+    required this.speaking,
+    required this.onReplay,
+    required this.onInterrupt,
+  });
   final String text;
   final bool retry;
   final bool busy;
+
+  /// O assistente esta falando: tocar no cartao interrompe.
+  final bool speaking;
   final VoidCallback onReplay;
+  final VoidCallback onInterrupt;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    return GestureDetector(
+      onTap: speaking ? onInterrupt : null,
+      child: _card(context, scheme),
+    );
+  }
+
+  Widget _card(BuildContext context, ColorScheme scheme) {
     return Card(
       color: retry ? scheme.tertiaryContainer : scheme.primaryContainer,
       margin: const EdgeInsets.only(bottom: 12),
@@ -649,9 +826,9 @@ class _QuestionCard extends StatelessWidget {
                           color: retry ? scheme.onTertiaryContainer : scheme.onPrimaryContainer)),
             ),
             IconButton(
-              tooltip: 'Ouvir de novo',
-              onPressed: busy ? null : onReplay,
-              icon: const Icon(Icons.volume_up_outlined),
+              tooltip: speaking ? 'Parar de falar' : 'Ouvir de novo',
+              onPressed: busy ? null : (speaking ? onInterrupt : onReplay),
+              icon: Icon(speaking ? Icons.stop_circle_outlined : Icons.volume_up_outlined),
             ),
           ],
         ),

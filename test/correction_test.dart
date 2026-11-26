@@ -142,7 +142,9 @@ void main() {
       expect(m.state, DialogState.askCompany);
       m.handle('voltar');
       m.handle('Doces da Bia');
-      expect(m.state, DialogState.askSector); // seguiu a ordem normal
+      // Seguiu a ordem sem repetir o que ja foi respondido (ramo, produto, ingredientes...):
+      // vai para a primeira pergunta sem resposta (caracteristicas foram puladas).
+      expect(m.state, DialogState.askCharacteristics);
     });
   });
 }

@@ -165,7 +165,21 @@ class ConversationStore implements InterpreterContext {
       changed = true;
     }
     if (p.hasProfile) {
-      final active = activeProduct ?? _byName(p.product!);
+      var active = activeProduct;
+      if (active == null) {
+        final same = _byName(p.product!);
+        if (same != null) {
+          // Produto com o MESMO nome de um salvo (ex.: "Nova conversa" e "bolo de
+          // cenoura" de novo): reativa o salvo SEM apagar o que ele tinha. So os
+          // campos ja respondidos agora substituem os antigos; a conversa oferece
+          // reaproveitar o resto.
+          _activeId = same.id;
+          same
+            ..session = _keepOld(p, same.session)
+            ..updatedAt = DateTime.now();
+          return _persist();
+        }
+      }
       if (active == null) {
         final r = ProductRecord(_newId(), p);
         _products.add(r);
@@ -209,6 +223,56 @@ class ConversationStore implements InterpreterContext {
     _clearConversationFields();
     return _persist();
   }
+
+  static SalesSession _keepOld(SalesSession newer, SalesSession older) => SalesSession(
+        company: newer.company ?? older.company,
+        sector: newer.sector ?? older.sector,
+        product: newer.product ?? older.product,
+        materials: newer.materials ?? older.materials,
+        batchYield: newer.batchYield ?? older.batchYield,
+        productionMinutes: newer.productionMinutes ?? older.productionMinutes,
+        characteristics: newer.characteristics ?? older.characteristics,
+        costs: newer.costs ?? older.costs,
+      );
+
+  /// Palavras do pedido que nao sao nome de produto ("use a receita que voce ja tem").
+  static const _requestWords = {
+    'usa', 'use', 'usar', 'utilize', 'utiliza', 'utilizar', 'aproveita', 'aproveite',
+    'copia', 'copie', 'pega', 'pegue', 'mesmo', 'mesma', 'receita', 'dado', 'ficha',
+    'ingrediente', 'produto', 'voce', 'vc', 'ja', 'tem', 'tinha', 'salvo', 'salva',
+    'guardado', 'guardada', 'cadastrado', 'cadastrada', 'anterior', 'aquele', 'aquela',
+    'esse', 'essa', 'este', 'esta', 'por', 'favor',
+  };
+
+  /// Produto salvo citado no pedido ("use a receita do bolo de cenoura que voce ja
+  /// tem"), ou, sem nome no pedido, o produto com o nome [current]. So devolve produto
+  /// que tenha ingredientes ou tabela de custo.
+  /// Com [exact], so vale produto com o MESMO nome (oferta automatica da conversa).
+  SalesSession? findSavedProduct(String request, {String? current, bool exact = false}) {
+    final q = tokenizePt(request).where((w) => !_requestWords.contains(w)).toSet();
+    final query = q.isNotEmpty ? q : tokenizePt(current ?? '').toSet();
+    if (query.isEmpty) return null;
+    ProductRecord? best;
+    var bestScore = 0.0;
+    for (final p in products) {
+      final s = p.session;
+      if (s.materials == null && (s.costs?.materials.isEmpty ?? true)) continue;
+      final name = tokenizePt(p.name).toSet();
+      if (name.isEmpty) continue;
+      final inter = name.intersection(query).length;
+      if (exact && (inter != name.length || inter != query.length)) continue;
+      // Quanto do nome salvo foi citado, e quanto do pedido bate com o nome.
+      final score = inter / name.length + inter / query.length;
+      if (inter > 0 && inter / name.length >= 0.5 && score > bestScore) {
+        best = p;
+        bestScore = score;
+      }
+    }
+    return best?.session;
+  }
+
+  /// Nomes dos produtos salvos (para dizer quais existem).
+  List<String> get savedProductNames => [for (final p in products) p.name];
 
   ProductRecord? _byName(String name) {
     final key = tokenizePt(name).join(' ');

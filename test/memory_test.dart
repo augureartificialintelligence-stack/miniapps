@@ -149,6 +149,76 @@ void main() {
       expect(s.company, 'Doces da Ana');
     });
 
+    group('reaproveitar receita de produto salvo', () {
+      const receita = 'três cenouras três ovos uma xícara de óleo duas xícaras de farinha';
+
+      /// Maquina como o app monta: com a memoria e salvando o cadastro a cada passo.
+      Future<(ConversationStore, DialogMachine)> newProductMachine() async {
+        final s = await ConversationStore.open(dir);
+        await s.saveProfile(const SalesSession(
+            company: 'Alfaprotein',
+            product: 'bolo de cenoura',
+            materials: receita,
+            batchYield: 12,
+            productionMinutes: 70));
+        await s.startNewProduct(); // "Nova conversa"
+        final m = DialogMachine(
+          profile: s.profile,
+          recallProduct: (r, {current, exact = false}) =>
+              s.findSavedProduct(r, current: current, exact: exact),
+          savedProductNames: () => s.savedProductNames,
+        );
+        expect(m.start().state, DialogState.askProduct);
+        return (s, m);
+      }
+
+      test('mesmo nome: oferece usar os dados salvos, sem apagar o salvo', () async {
+        final (s, m) = await newProductMachine();
+        final r = m.handle('bolo de cenoura');
+        expect(r.state, DialogState.askReuse);
+        expect(r.text, contains('Já tenho a ficha de bolo de cenoura salva'));
+        expect(r.text, contains('rende 12 por lote'));
+        // O app salva o cadastro a cada passo: o produto salvo NAO pode perder a receita.
+        await s.saveProfile(m.profile);
+        expect(s.profile.materials, receita);
+        expect(s.products, hasLength(1)); // nao duplicou
+
+        final r2 = m.handle('sim');
+        expect(r2.state, DialogState.askQuantity);
+        expect(r2.text, contains('usei os dados salvos de bolo de cenoura'));
+        expect(m.session.materials, receita);
+        expect(m.session.productionMinutes, 70);
+        expect(m.costTable!.materials, hasLength(4)); // lista com quantidades na tela
+      });
+
+      test('"nao" cadastra de novo', () async {
+        final (_, m) = await newProductMachine();
+        m.handle('bolo de cenoura');
+        expect(m.handle('não').state, DialogState.askMaterials);
+        expect(m.session.materials, isNull);
+      });
+
+      test('frase real: "utilize dados de receita de bolo de cenoura que você já tem"',
+          () async {
+        final (_, m) = await newProductMachine();
+        m.handle('bolo de cenoura de pote'); // nome diferente: nao oferece sozinho
+        expect(m.state, DialogState.askMaterials);
+        final r = m.handle('utilize dados de receita de bolo de cenoura que você já tem');
+        expect(r.state, DialogState.askQuantity);
+        expect(m.session.materials, receita); // nao guardou a frase como ingredientes
+        expect(m.session.product, 'bolo de cenoura de pote');
+      });
+
+      test('pedido sem produto salvo avisa quais existem', () async {
+        final (_, m) = await newProductMachine();
+        m.handle('torta de limão');
+        final r = m.handle('use a receita de brigadeiro que você já tem');
+        expect(r.understood, isFalse);
+        expect(r.state, DialogState.askMaterials);
+        expect(r.text, contains('Tenho salvos: bolo de cenoura'));
+      });
+    });
+
     test('arquivo corrompido nao trava: memoria vazia', () async {
       await File('${dir.path}/${ConversationStore.memoryFileName}').writeAsString('{lixo');
       final s = await ConversationStore.open(dir);

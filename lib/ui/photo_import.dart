@@ -23,12 +23,22 @@ class _Photo {
 /// aparelho, identifica se e RECEITA ou COMPRA (a pessoa pode trocar) e pergunta se ha
 /// mais imagens. Devolve tudo o que foi lido ao tocar em "Concluir".
 class PhotoImportPage extends StatefulWidget {
-  const PhotoImportPage({super.key, required this.scanner, required this.first, this.onAsk});
+  const PhotoImportPage({
+    super.key,
+    required this.scanner,
+    this.first,
+    this.initialPaths = const [],
+    this.onAsk,
+  });
 
   final TextScanner scanner;
 
-  /// De onde vem a primeira imagem (camera ou galeria).
-  final ImageSource first;
+  /// De onde vem a primeira imagem (camera ou galeria). null com [initialPaths].
+  final ImageSource? first;
+
+  /// Fotos ja tiradas (ex.: recuperadas depois que o Android fechou o app com a camera
+  /// aberta). Sao lidas direto, sem abrir a camera de novo.
+  final List<String> initialPaths;
 
   /// Fala a pergunta "tem mais alguma imagem?" (voz do assistente).
   final void Function(String text)? onAsk;
@@ -46,7 +56,13 @@ class _PhotoImportPageState extends State<PhotoImportPage> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _add(widget.first));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (widget.initialPaths.isNotEmpty) {
+        _read([for (final p in widget.initialPaths) XFile(p)]);
+      } else if (widget.first != null) {
+        _add(widget.first!);
+      }
+    });
   }
 
   Future<void> _add(ImageSource source) async {
@@ -67,6 +83,11 @@ class _PhotoImportPageState extends State<PhotoImportPage> {
       if (_photos.isEmpty && mounted) Navigator.pop(context);
       return;
     }
+    await _read(files);
+  }
+
+  /// Le o texto das fotos no aparelho e identifica receita x compra.
+  Future<void> _read(List<XFile> files) async {
     setState(() {
       _reading = true;
       _error = null;

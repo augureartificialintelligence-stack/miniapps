@@ -143,6 +143,7 @@ class UtteranceInterpreter {
             return v is num && v == v.roundToDouble() ? '${v.toInt()}' : null;
           },
         );
+      case DialogState.askReuse:
       case DialogState.offerDetail:
       case DialogState.confirm:
         return _Spec(

@@ -48,7 +48,15 @@ class _AugureMiniAppState extends State<AugureMiniApp> {
   SmartDialog _buildDialog() {
     final store = widget.store;
     // Cadastro salvo (um produto): com ele, a conversa vai direto ao preco.
-    final machine = DialogMachine(profile: store?.profile);
+    final machine = DialogMachine(
+      profile: store?.profile,
+      // Reaproveitar a receita/dados de um produto salvo ("use a receita que voce ja tem").
+      recallProduct: store == null
+          ? null
+          : (request, {current, exact = false}) =>
+              store.findSavedProduct(request, current: current, exact: exact),
+      savedProductNames: store == null ? null : () => store.savedProductNames,
+    );
     machine.onCorrected = (field, oldValue, newValue) {
       debugPrint('[AUGURE][DLG] correcao ${field.name}: "$oldValue" -> "$newValue"');
       store?.logExample({

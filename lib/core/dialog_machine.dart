@@ -14,6 +14,9 @@ enum DialogState {
   /// Ramo do negocio (confeitaria, salgados, marmitas...).
   askSector,
   askProduct,
+
+  /// Produto com o mesmo nome de um salvo: "quer usar os mesmos dados?". Fora da ordem.
+  askReuse,
   askMaterials,
   askBatchYield,
   askProductionTime,
@@ -259,6 +262,73 @@ final _connector = RegExp(
 
 /// Detecta "corrigir <campo> [para <valor>]" em linguagem natural.
 /// Exige um verbo de correcao E um campo conhecido; o resto vira o valor novo.
+/// Fim do valor de uma informacao dita no meio da fala: pontuacao, outra informacao
+/// ("... e a margem e 40") ou fim do texto.
+const _valueEnd = r'(?=\s*(?:[,;.!?]|\s+e\s+(?:o|a|os|as|rende|rendem|leva|demora|custa|custo|'
+    r'margem|tempo|rendimento|produto|empresa|ramo|quantidade)\b|$))';
+
+/// Informacoes ditas pelo nome, em qualquer pergunta ("a margem e 40%", "rende 15",
+/// "leva 2 horas", "o custo foi 20 reais", "a empresa se chama X"). Cada padrao captura o
+/// valor; o valor so vale se o parser daquele campo entender (sem isso, e ignorado).
+final _statements = <DialogState, RegExp>{
+  DialogState.askCompany: RegExp(
+      r'\b(?:empresa|loja|marca|negocio)\s+(?:se\s+chama|chama|e|eh)\s+(.+?)' + _valueEnd),
+  DialogState.askSector: RegExp(r'\bramo\s+(?:e|eh|de)\s+(.+?)' + _valueEnd),
+  DialogState.askProduct: RegExp(r'\bproduto\s+(?:e|eh|se\s+chama)\s+(.+?)' + _valueEnd),
+  DialogState.askBatchYield: RegExp(
+      r'\b(?:rende|rendem|rendimento\s+(?:e|eh|de)|cada\s+(?:lote|fornada|panela)\s+(?:rende|da|faz))\s+(.+?)' +
+          _valueEnd),
+  DialogState.askProductionTime: RegExp(
+      r'\b(?:leva|levo|demora|demoro|tempo(?:\s+de\s+producao)?\s+(?:e|eh|de))\s+(.+?)' +
+          _valueEnd),
+  DialogState.askQuantity: RegExp(
+      r'\b(?:quantidade\s+(?:e|eh|de)|vou\s+vender|quero\s+vender)\s+(\S+\s+unidades)\b'),
+  DialogState.askCost: RegExp(
+      r'\b(?:custo(?:\s+total)?|gasto(?:\s+total)?|gastei|gasto)\s+(?:e|eh|de|foi|fica|ficou)?\s*(.+?)' +
+          _valueEnd),
+  DialogState.askMargin: RegExp(r'\bmargem\s+(?:e|eh|de|fica|seja)?\s*(.+?)' + _valueEnd),
+};
+
+/// Informacoes que a fala traz pelo nome do campo: {campo: valor dito}. O texto e
+/// analisado sem acento; o valor devolvido e o trecho ORIGINAL (com acentos).
+Map<DialogState, String> parseFieldStatements(String input) =>
+    {for (final s in _findStatements(input)) s.field: s.value};
+
+/// O que sobra da fala sem as informacoes ditas pelo nome do campo ("cenoura e ovos,
+/// e rende 12" -> "cenoura e ovos"): e a resposta da pergunta atual.
+String remainderWithoutStatements(String input) {
+  var t = input.trim();
+  final spans = _findStatements(t).toList()..sort((a, b) => b.start.compareTo(a.start));
+  for (final s in spans) {
+    t = t.replaceRange(s.start, s.end, ' ');
+  }
+  return t
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .replaceAll(RegExp(r'(^|\s)(e|ah|entao|então|tambem|também|o|a|os|as)(?=\s*([,;.]|$))',
+          caseSensitive: false), ' ')
+      .replaceAll(RegExp(r'^[\s,;.e]+|[\s,;.]+(e)?[\s,;.]*$', caseSensitive: false), '')
+      .trim();
+}
+
+Iterable<({DialogState field, String value, int start, int end})> _findStatements(
+    String input) sync* {
+  final t = input.trim();
+  final n = normalizePt(t);
+  for (final e in _statements.entries) {
+    final m = e.value.firstMatch(n);
+    if (m == null) continue;
+    // O valor e o fim do trecho casado (o lookahead do fim nao consome texto).
+    final g = m.group(1)!;
+    final v = t.substring(m.end - g.length, m.end).trim();
+    // O trecho a remover inclui "o/a" e "e" logo antes ("..., e a margem e 40").
+    var start = m.start;
+    final before = n.substring(0, start);
+    final lead = RegExp(r'(\s*(,|\be)\s*)?(\b(o|a|os|as)\s+)?$').firstMatch(before);
+    if (lead != null) start = lead.start;
+    if (v.isNotEmpty) yield (field: e.key, value: v, start: start, end: m.end);
+  }
+}
+
 CorrectionRequest? parseCorrection(String input) {
   final norm = normalizePt(input);
   if (!RegExp(_correctionTrigger).hasMatch(norm)) return null;
@@ -292,13 +362,24 @@ CorrectionRequest? parseCorrection(String input) {
 /// e feita uma vez e vira o cadastro ([profile]); nas proximas conversas o app vai direto
 /// ao preco desse produto, e o cadastro so muda por correcao ("corrigir o tempo").
 class DialogMachine {
-  DialogMachine({SalesSession? profile}) {
+  DialogMachine({SalesSession? profile, this.recallProduct, this.savedProductNames}) {
     _state = DialogState.askCompany;
     if (profile != null) this.profile = profile.keepTriage();
   }
 
   /// Cadastro do usuario (triagem salva). Atualizado sempre que a triagem muda.
   SalesSession profile = const SalesSession();
+
+  /// Memoria local: produto salvo citado num pedido ("use a receita do bolo que voce ja
+  /// tem") ou com o nome [current]. null = nao achou.
+  /// [exact]: so o produto com o mesmo nome (oferta automatica apos o nome do produto).
+  final SalesSession? Function(String request, {String? current, bool exact})? recallProduct;
+
+  /// Nomes dos produtos salvos (para dizer quais existem quando nao acha).
+  final List<String> Function()? savedProductNames;
+
+  /// Produto salvo aguardando "sim/nao" em [DialogState.askReuse].
+  SalesSession? _recalled;
 
   /// Avisado a cada correcao (campo, valor antigo, valor novo): sinal de aprendizado.
   void Function(DialogState field, Object? oldValue, Object? newValue)? onCorrected;
@@ -426,6 +507,10 @@ class DialogMachine {
     // Na entrevista de custo, frases como "o frete custa 20" nao sao correcoes.
     if (_state == DialogState.costDetail) return _answer(input);
 
+    // "use a receita do bolo de cenoura que voce ja tem": reaproveita um produto salvo.
+    final reuse = _tryReuseRequest(input);
+    if (reuse != null) return reuse;
+
     // Depois do resultado: "quero vender por 6 reais" simula o lucro com esse preco.
     if (_state == DialogState.result || _state == DialogState.offerDetail) {
       final sim = _trySimulate(input);
@@ -435,14 +520,81 @@ class DialogMachine {
     final fix = parseCorrection(input);
     if (fix != null) {
       if (!_canCorrect(fix.field)) {
-        // Nao vira resposta da pergunta atual (era o bug do "corrigir" virar produto).
+        // Ainda nao perguntado: com valor, ja anota; sem valor, nao vira resposta da
+        // pergunta atual (era o bug do "corrigir" virar produto).
+        if (fix.value != null) {
+          final early = _applyStatements({fix.field: fix.value!});
+          if (early != null) return early;
+        }
         return _retry('Essa informação ainda não foi respondida. ${_question(_state)}');
       }
       return fix.field == _state && fix.value != null
           ? _answer(fix.value!) // "na verdade rende trinta" na propria pergunta
           : _correct(fix.field, fix.value);
     }
+
+    // Informacoes de OUTRAS perguntas ditas no meio da resposta ("... e a margem e 40%"):
+    // corrige o que ja foi respondido e adianta o que ainda nao foi perguntado.
+    final stmts = parseFieldStatements(input);
+    if (stmts.keys.any((f) => f != _state && correctableStates.contains(f))) {
+      final r = _applyStatements(stmts, original: input);
+      if (r != null) return r;
+    }
     return _answer(input);
+  }
+
+  /// Aplica informacoes ditas pelo nome do campo. A do campo da pergunta atual vira a
+  /// resposta; as outras corrigem (ja respondidas) ou adiantam (ainda nao perguntadas).
+  /// null = nenhuma informacao valida (a fala segue como resposta normal).
+  DialogResponse? _applyStatements(Map<DialogState, String> stmts, {String? original}) {
+    final acks = <String>[];
+    var changedAnswered = false;
+    for (final e in stmts.entries) {
+      final f = e.key;
+      if (f == _state || !correctableStates.contains(f)) continue;
+      final parsed = _parseField(f, e.value, false);
+      if (parsed.error != null || parsed.value == null) continue;
+      final old = _valueOf(f);
+      if (old == parsed.value) continue;
+      final answered = _canCorrect(f);
+      if (answered) {
+        onCorrected?.call(f, old, parsed.value);
+        changedAnswered = true;
+        acks.add(_fixAck(f, parsed.value));
+      } else {
+        acks.add(_fixAck(f, parsed.value).replaceFirst('Corrigido:', 'Anotei:'));
+      }
+      _setField(f, parsed.value);
+    }
+    if (acks.isEmpty) return null;
+    final ack = acks.join(' ');
+
+    // Resposta da pergunta atual dita junto (pelo nome do campo ou no resto da fala).
+    var current = stmts[_state];
+    if (current == null && original != null) {
+      final rest = remainderWithoutStatements(original);
+      if (rest.length >= 2 && RegExp(r'[\p{L}\d]', unicode: true).hasMatch(rest)) {
+        final r = _answer(rest);
+        if (r.understood) {
+          return DialogResponse('$ack ${r.text}', r.state,
+              result: r.result, breakdown: r.breakdown, understood: true);
+        }
+      }
+    }
+    if (current != null) {
+      final r = _answer(current);
+      return DialogResponse('$ack ${r.text}', r.state,
+          result: r.result, breakdown: r.breakdown, understood: r.understood);
+    }
+    // Mudou um dado do calculo depois do resultado: volta para a confirmacao.
+    if (changedAnswered &&
+        const {DialogState.confirm, DialogState.result, DialogState.offerDetail}
+            .contains(_state)) {
+      _simulation = null;
+      return _goto(DialogState.confirm, '$ack ${_confirmationText()}');
+    }
+    // Senao, continua na mesma pergunta.
+    return _say('$ack ${_question(_state)}');
   }
 
   /// Volta para uma resposta anterior (lapis na tela ou "corrigir <campo>").
@@ -458,6 +610,17 @@ class DialogMachine {
       return _startInterview();
     }
     switch (_state) {
+      case DialogState.askReuse:
+        final yn = parseYesNo(input);
+        final saved = _recalled;
+        if (yn == YesNo.yes && saved != null) return _applySaved(saved);
+        if (yn == YesNo.no || saved == null) {
+          _recalled = null;
+          return _goto(DialogState.askMaterials,
+              'Tudo bem, vamos cadastrar de novo. ${_question(DialogState.askMaterials)}');
+        }
+        return _retry('Responda sim para usar os dados salvos, ou não para cadastrar de novo.');
+
       case DialogState.confirm:
         final yn = parseYesNo(input);
         if (yn == YesNo.yes) return _finish();
@@ -562,6 +725,7 @@ class DialogMachine {
             ? const _Parsed.error(
                 'Diga uma margem entre zero e noventa por cento. Por exemplo: trinta.')
             : _Parsed(v);
+      case DialogState.askReuse:
       case DialogState.confirm:
       case DialogState.result:
       case DialogState.offerDetail:
@@ -592,6 +756,7 @@ class DialogMachine {
       case DialogState.askCost:
         return 'Anotei ${speakBrl(v as int)} de custo.';
       case DialogState.askMargin:
+      case DialogState.askReuse:
       case DialogState.confirm:
       case DialogState.result:
       case DialogState.offerDetail:
@@ -624,6 +789,7 @@ class DialogMachine {
         return 'Corrigido: custo de ${speakBrl(v as int)}.';
       case DialogState.askMargin:
         return 'Corrigido: margem de $v por cento.';
+      case DialogState.askReuse:
       case DialogState.confirm:
       case DialogState.result:
       case DialogState.offerDetail:
@@ -644,8 +810,22 @@ class DialogMachine {
       return _goto(resume, 'Pronto. $fix ${_resumeQuestion(resume)}');
     }
 
+    // Produto com o mesmo nome de um salvo: oferece reaproveitar a receita e os dados.
+    if (answered == DialogState.askProduct) {
+      final saved =
+          recallProduct?.call(_session.product!, current: _session.product, exact: true);
+      if (saved != null) {
+        _recalled = saved;
+        return _goto(DialogState.askReuse, '$ack ${_reuseQuestion(saved)}');
+      }
+    }
 
-    final next = dialogOrder[dialogOrder.indexOf(answered) + 1];
+    // Pula perguntas que a pessoa ja respondeu antes, fora de ordem ("... e rende 15").
+    var i = dialogOrder.indexOf(answered) + 1;
+    while (dialogOrder[i] != DialogState.confirm && _valueOf(dialogOrder[i]) != null) {
+      i++;
+    }
+    final next = dialogOrder[i];
     final text = next == DialogState.confirm ? _confirmationText() : _question(next);
     return _goto(next, ack.isEmpty ? text : '$ack $text');
   }
@@ -730,6 +910,77 @@ class DialogMachine {
     return t;
   }
 
+  String _reuseQuestion(SalesSession saved) {
+    final parts = [
+      if (saved.costs?.materials.isNotEmpty ?? false)
+        '${saved.costs!.materials.length} ingredientes'
+      else if (saved.materials != null)
+        'ingredientes: ${saved.materials}',
+      if (saved.batchYield != null) 'rende ${saved.batchYield} por lote',
+      if (saved.productionMinutes != null) 'leva ${speakDuration(saved.productionMinutes!)}',
+      if (saved.costs?.materials.any((m) => m.priceCents != null) ?? false) 'com preços',
+    ];
+    return 'Já tenho a ficha de ${saved.product} salva: ${parts.join('; ')}. Quer usar os '
+        'mesmos dados?';
+  }
+
+  /// "use a receita do bolo de cenoura que voce ja tem", "aproveita os dados que voce
+  /// tem": copia ingredientes, rendimento, tempo e tabela de custo de um produto salvo.
+  /// So nas perguntas da triagem (nao mexe no preco nem na entrevista de custo).
+  DialogResponse? _tryReuseRequest(String input) {
+    final idx = dialogOrder.indexOf(_state);
+    final inTriage = _state == DialogState.askReuse ||
+        (idx > dialogOrder.indexOf(DialogState.askProduct) &&
+            idx < dialogOrder.indexOf(DialogState.askQuantity));
+    if (!inTriage || recallProduct == null) return null;
+    final n = normalizePt(input);
+    if (!RegExp(r'\b(usa|use|usar|utilize|utiliza|utilizar|aproveita|aproveite|copia|copie|'
+            r'pega|pegue|mesm[ao]s?)\b')
+            .hasMatch(n) ||
+        !RegExp(r'\b(receita|dados|ficha|ingredientes|mesm[ao]s?|ja tem|tinha|salv[ao])\b')
+            .hasMatch(n)) {
+      return null;
+    }
+    final saved = recallProduct!(input, current: _session.product);
+    if (saved == null) {
+      final names = savedProductNames?.call() ?? const [];
+      return _retry('Não encontrei receita salva para esse produto. '
+          '${names.isEmpty ? '' : 'Tenho salvos: ${names.join(', ')}. '}'
+          '${_question(_state)}');
+    }
+    return _applySaved(saved);
+  }
+
+  /// Copia a receita e os dados de um produto salvo e segue para o preco.
+  DialogResponse _applySaved(SalesSession saved) {
+    _recalled = null;
+    _session = SalesSession(
+      company: _session.company ?? saved.company,
+      sector: _session.sector ?? saved.sector,
+      product: _session.product ?? saved.product,
+      materials: saved.materials,
+      batchYield: saved.batchYield,
+      productionMinutes: saved.productionMinutes,
+      characteristics: saved.characteristics,
+      costs: saved.costs == null ? null : CostBreakdown.fromJson(saved.costs!.toJson()),
+    );
+    if (_session.costs == null && saved.materials != null) {
+      _session = _session.withCosts(_draftFromMaterials(saved.materials));
+    }
+    profile = _session.keepTriage();
+    final got = [
+      if (_session.costs?.materials.isNotEmpty ?? false)
+        '${_session.costs!.materials.length} ingredientes',
+      if (_session.batchYield != null) 'rende ${_session.batchYield}',
+      if (_session.productionMinutes != null) 'leva ${speakDuration(_session.productionMinutes!)}',
+    ];
+    return _goto(
+        DialogState.askQuantity,
+        'Pronto, usei os dados salvos de ${saved.product}'
+        '${got.isEmpty ? '' : ': ${got.join(', ')}'}. Agora vamos ao preço. '
+        '${_question(DialogState.askQuantity)}');
+  }
+
   /// Valor atual de um campo (para log, correcoes e exemplos de aprendizado).
   Object? valueOf(DialogState field) => _valueOf(field);
 
@@ -763,6 +1014,9 @@ class DialogMachine {
             'panificação, açaí, bebidas, artesanato ou cosméticos.';
       case DialogState.askProduct:
         return 'Qual produto você quer vender?';
+      case DialogState.askReuse:
+        final saved = _recalled;
+        return saved != null ? _reuseQuestion(saved) : _question(DialogState.askMaterials);
 
       case DialogState.askMaterials:
         return 'Do que $product é feito? Fale os principais ingredientes ou materiais, '
@@ -834,6 +1088,10 @@ class DialogMachine {
 
   DialogResponse _back() {
     _resumeTo = null;
+    if (_state == DialogState.askReuse) {
+      _recalled = null;
+      return _goto(DialogState.askProduct, _question(DialogState.askProduct));
+    }
     if (_state == DialogState.costDetail) {
       if (_interview!.back()) return _say(_interview!.question());
       return _goto(DialogState.offerDetail, _offerText);
@@ -976,6 +1234,7 @@ class DialogMachine {
         'resumeTo': _resumeTo?.name,
         'correctingOld': _correctingOld,
         'interview': _interview?.toJson(),
+        'recalled': _recalled?.toJson(),
       };
 
   /// Restaura um snapshot salvo. Retorna false se o snapshot for invalido.
@@ -995,6 +1254,9 @@ class DialogMachine {
       final interview = CostInterview.fromJson(j['interview']);
       if (state == DialogState.costDetail && interview == null) return false;
       _interview = interview;
+      final recalled = j['recalled'];
+      _recalled = recalled is Map ? SalesSession.fromJson(recalled.cast<String, Object?>()) : null;
+      if (state == DialogState.askReuse && _recalled == null) return false;
       _state = state;
       _session = session;
       _lastPrompt = j['lastPrompt'] as String? ?? '';
