@@ -200,6 +200,78 @@ void main() {
     });
   });
 
+  group('ingredientes ditados numa frase so', () {
+    // Fala real do teste no celular (sem virgulas, partes no meio da frase).
+    const spoken = 'três cenouras três ovos uma xícara de chá de óleo uma xícara e meia de '
+        'chá de Açúcar duas xícaras de farinha de trigo uma colher de sopa de fermento em pó '
+        'e uma pitada de sal para a massa. para a cobertura é chocolate em pó 50% Cacau 1/2 '
+        'xícara meia xícara de açúcar e uma colher de manteiga e 4 a 5 colheres de leite';
+
+    test('separa cada ingrediente com a quantidade e a parte', () {
+      final items = parseSpokenRecipe(spoken);
+      expect([for (final i in items) '${i.part}|${i.name}|${i.used}'], [
+        'Massa|cenouras|${const Measure(3, un)}',
+        'Massa|ovos|${const Measure(3, un)}',
+        'Massa|óleo|${const Measure(240, ml)}',
+        'Massa|açúcar|${const Measure(360, ml)}',
+        'Massa|farinha de trigo|${const Measure(480, ml)}',
+        'Massa|fermento em pó|${const Measure(15, ml)}',
+        'Massa|sal|${const Measure(0.5, g)}',
+        'Cobertura|chocolate em pó 50% Cacau|${const Measure(120, ml)}',
+        'Cobertura|açúcar|${const Measure(120, ml)}',
+        'Cobertura|manteiga|${const Measure(15, ml)}',
+        'Cobertura|leite|${const Measure(75, ml)}', // "4 a 5 colheres": usa o maior
+      ]);
+    });
+
+    test('lista simples sem quantidades continua funcionando', () {
+      expect(parseSpokenRecipe('arroz, feijão e frango').map((i) => i.name),
+          ['arroz', 'feijão', 'frango']);
+      expect(parseSpokenRecipe('massa: farinha e ovos. cobertura: chocolate')
+          .map((i) => '${i.part}|${i.name}'),
+          ['Massa|farinha', 'Massa|ovos', 'Cobertura|chocolate']);
+    });
+
+    test('na conversa: vira a lista da tela e o custo so pergunta os precos', () {
+      final m = DialogMachine()..start();
+      m.handle('Alfaprotein');
+      m.handle('confeitaria');
+      m.handle('bolo de cenoura');
+      m.handle(spoken);
+      expect(m.state, DialogState.askBatchYield);
+      final t = m.costTable!;
+      expect(t.materials, hasLength(11)); // lista ja aparece na tela
+      expect(t.parts, ['Massa', 'Cobertura']);
+
+      m.handle('12 unidades');
+      m.handle('70 minutos');
+      m.handle('pular');
+      m.handle('12 unidades');
+      m.handle('18 reais');
+      m.handle('30%');
+      m.handle('sim'); // confirma
+      final r = m.handle('sim'); // detalhar o custo
+      // Ja tem partes e quantidades: nao pergunta partes nem quantidades, so o preco.
+      expect(r.text, contains('Quanto você paga em cenouras'));
+    });
+
+    test('corrigir os ingredientes mantem os precos ja informados', () {
+      final m = DialogMachine()..start();
+      m.handle('Alfaprotein');
+      m.handle('confeitaria');
+      m.handle('bolo');
+      m.handle('2 xícaras de farinha e 3 ovos');
+      m.costTable!.materials.first
+        ..priceCents = 600
+        ..pack = const Measure(1000, g);
+      m.handle('corrigir os ingredientes para 3 xícaras de farinha, 3 ovos e 1 xícara de leite');
+      final farinha = m.costTable!.materials.first;
+      expect(farinha.used, const Measure(720, ml));
+      expect(farinha.priceCents, 600); // preco mantido
+      expect(m.costTable!.materials, hasLength(3));
+    });
+  });
+
   group('preco da unidade separado do preco do lote', () {
     test('resultado principal e tabela de custo', () {
       final m = DialogMachine(

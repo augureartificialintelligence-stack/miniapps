@@ -104,13 +104,113 @@ List<RecipeItem> parseRecipe(String text) {
 /// Quantidade + medida no comeco da linha ("1 e 1/2 xicara de", "2 colheres de sopa de",
 /// "1 lata de"). O nome do ingrediente e o que vem depois.
 final _qtyPrefix = RegExp(
-    r'^\s*(?:(?:[\d½¼¾⅓/.,]+|uma?|duas|dois|tres|meia|meio)'
+    r'^\s*(?:(?:[\d½¼¾⅓/.,]+|uma?|duas|dois|tres|quatro|cinco|seis|sete|oito|nove|dez|doze|meia|meio)'
     r'(?:\s+e\s+(?:[\d½¼¾⅓/.,]+|meia|meio))?\s*)?'
     r'(?:(?:xicaras?(?:\s+de\s+cha)?|xic\.?|colher(?:es)?\s+de\s+(?:sopa|cha|sobremesa)|'
     r'colher(?:es|inhas?)?|copos?(?:\s+americanos?)?|kg|g|gr|gramas?|quilos?|ml|l|litros?|'
     r'latas?|caixas?|caixinhas?|pacotes?|potes?|unidades?|un|duzias?|pitadas?|dentes?|'
-    r'fatias?|xicaras?)\b\s*)?'
+    r'fatias?|xicaras?)\b(?:\s+e\s+mei[ao])?(?:\s+de\s+(?:cha|sopa|sobremesa))?\s*)?'
     r'(?:(?:de|do|da)\s+)?');
+
+/// Inicio de um ingrediente numa fala corrida: um numero ou numeral ("tres cenouras",
+/// "uma xicara de oleo", "1/2 xicara"). Nao conta "e meia" (parte da medida anterior),
+/// "a 5" ("4 a 5 colheres") nem porcentagem ("50% cacau").
+final _itemStart = RegExp(
+    r'(?<![\p{L}\d/.,%])(?<!\ba\s)(?<!\bou\s)'
+    r'(?:\d+(?:[.,/]\d+)?(?![\d%])|½|¼|¾|uma?|dois|duas|tres|quatro|cinco|seis|sete|oito|'
+    r'nove|dez|doze|(?<!\be\s)mei[ao])(?=\s)',
+    unicode: true);
+
+/// Marcador de parte do produto na fala: "para a massa", "na cobertura", "recheio:".
+final _spokenPart = RegExp(
+    r'\b(?:para\s+(?:a|o|as|os)|na|no|da|do)\s+(massa|recheio|cobertura|calda|creme|base|'
+    r'ganache|decoracao|montagem|molho|farofa|topping)s?\b|\b(massa|recheio|cobertura|calda)\s*:');
+
+/// Ingredientes DITADOS ou digitados numa frase so, sem quebra de linha:
+/// "tres cenouras tres ovos uma xicara de oleo ... para a massa. para a cobertura e
+/// chocolate em po 1/2 xicara, meia xicara de acucar e uma colher de manteiga".
+/// Separa cada ingrediente pela quantidade que comeca o item, guarda a medida e
+/// reconhece as partes (o marcador vale para o trecho ANTES dele quando vem no fim da
+/// frase, ex.: "... para a massa.", e para o trecho DEPOIS quando abre a frase).
+/// Sem nenhuma quantidade, cai na lista simples ("arroz, feijao e frango").
+List<RecipeItem> parseSpokenRecipe(String? text) {
+  if (text == null || text.trim().isEmpty) return const [];
+  final t = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+  final n = normalizePt(t); // mesmo tamanho de t: indices valem para os dois
+
+  // 1) Trechos por parte do produto.
+  final chunks = <(String, String?)>[];
+  String? pending;
+  var pos = 0;
+  for (final m in _spokenPart.allMatches(n)) {
+    final before = t.substring(pos, m.start);
+    final word = (m.group(1) ?? m.group(2))!;
+    final part = word[0].toUpperCase() + word.substring(1);
+    final after = n.substring(m.end).trimLeft();
+    final trailing = before.trim().isNotEmpty &&
+        pending == null &&
+        (after.isEmpty || after.startsWith('.') || after.startsWith(';'));
+    if (trailing) {
+      chunks.add((before, part));
+      pending = null;
+    } else {
+      chunks.add((before, pending));
+      pending = part;
+    }
+    pos = m.end;
+  }
+  chunks.add((t.substring(pos), pending));
+
+  // 2) Itens dentro de cada trecho.
+  final items = <RecipeItem>[];
+  for (final (chunk, part) in chunks) {
+    final c = chunk
+        .replaceFirst(RegExp(r'^[\s.,;:]*((e|é|sao|são|vai|leva)\s+)?', caseSensitive: false), '')
+        .replaceAllMapped(RegExp(r'(\d+)\s+a\s+(\d+)'),
+            (m) => '${int.parse(m[1]!) > int.parse(m[2]!) ? m[1] : m[2]}') // "4 a 5" -> 5
+        .trim();
+    if (c.isEmpty) continue;
+    final cn = normalizePt(c);
+    final starts = [for (final m in _itemStart.allMatches(cn)) m.start];
+    if (starts.isEmpty) {
+      for (final name in splitMaterials(c.replaceAll(RegExp(r'[.;:]+$'), ''))) {
+        items.add(RecipeItem(name, null, part: part));
+      }
+      continue;
+    }
+    // Texto antes do primeiro numero: nome sem quantidade (ou nome dito antes da medida).
+    final pieces = <String>[
+      if (starts.first > 0) c.substring(0, starts.first),
+      for (var i = 0; i < starts.length; i++)
+        c.substring(starts[i], i + 1 < starts.length ? starts[i + 1] : c.length),
+    ];
+    for (var piece in pieces) {
+      piece = piece
+          .replaceAll(RegExp(r'[\s,;.]+(e|com|mais)?[\s,;.]*$', caseSensitive: false), '')
+          .trim();
+      if (piece.isEmpty) continue;
+      final item = _recipeLine(piece, part);
+      if (item != null) {
+        items.add(item);
+        continue;
+      }
+      // So medida, sem nome ("chocolate em po 50% cacau 1/2 xicara"): e do item anterior.
+      final m = parseMeasure(piece);
+      if (m != null && items.isNotEmpty && items.last.used == null) {
+        final prev = items.removeLast();
+        items.add(RecipeItem(prev.name, m, part: prev.part));
+      }
+    }
+  }
+  // Nome sem medida com varios itens ("sal, oregano e pimenta"): separa.
+  return [
+    for (final it in items)
+      if (it.used == null && splitMaterials(it.name).length > 1)
+        for (final name in splitMaterials(it.name)) RecipeItem(name, null, part: it.part)
+      else
+        it,
+  ];
+}
 
 RecipeItem? _recipeLine(String line, String? part) {
   // "colher (sopa)" / "xicara (cha)": o parenteses faz parte da medida.
@@ -124,8 +224,8 @@ RecipeItem? _recipeLine(String line, String? part) {
     if (m != null && m.kind != MeasureKind.unit) used = m;
   }
   final clean = line.replaceAll(RegExp(r'\([^)]*\)'), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
-  final hasQty = RegExp(r'^\s*([\d½¼¾⅓]|(uma?|duas|dois|tres|meia|meio)\s)', caseSensitive: false)
-      .hasMatch(clean);
+  final hasQty = RegExp(r'^\s*([\d½¼¾⅓]|(uma?|duas|dois|tres|quatro|cinco|seis|sete|oito|nove|dez|doze|meia|meio)\s)')
+      .hasMatch(normalizePt(clean));
   if (hasQty) used ??= parseMeasure(clean);
 
   // Titulo da receita ou cabecalho ("BOLO DE CHOCOLATE", "Ingredientes"): nao e item.

@@ -487,6 +487,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
                       onCorrect: _busy || _listening ? null : _correctField),
                   if (table != null && table.materials.isNotEmpty) _CostTableCard(table),
                   if (_lastResult != null) _ResultCard(_lastResult!, s.batchYield),
+                  if (_machine.simulation != null) _SimulationCard(_machine.simulation!),
                 ],
               ),
             ),
@@ -840,6 +841,55 @@ class _CostTableCard extends StatelessWidget {
               line('Lucro por unidade', null, formatBrl(t.unitProfitCents!)),
               line('Lucro do lote', null, formatBrl(t.batchProfitCents!)),
             ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Simulacao com o preco escolhido pela pessoa: lucro, margem real e comparacao com o
+/// preco sugerido. Em vermelho quando da prejuizo.
+class _SimulationCard extends StatelessWidget {
+  const _SimulationCard(this.s);
+  final PriceSimulation s;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final loss = s.isLoss;
+    final fg = loss ? scheme.onErrorContainer : null;
+    Widget row(String a, String b, {bool big = false}) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 3),
+          child: Row(children: [
+            Expanded(child: Text(a, style: TextStyle(fontSize: big ? 17 : 15, color: fg))),
+            Text(b,
+                style: TextStyle(
+                    fontWeight: FontWeight.bold, fontSize: big ? 18 : 15, color: fg)),
+          ]),
+        );
+    return Card(
+      color: loss ? scheme.errorContainer : scheme.secondaryContainer,
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(loss ? 'Simulação: preço com PREJUÍZO' : 'Simulação com o seu preço',
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(color: fg)),
+            const SizedBox(height: 8),
+            row('Preço da unidade', formatBrl(s.priceCents), big: true),
+            row('Custo de produção da unidade', formatBrl(s.unitCostCents)),
+            row(loss ? 'Prejuízo por unidade' : 'Lucro por unidade',
+                formatBrl(s.unitProfitCents.abs())),
+            row('Margem real', '%'),
+            if (s.batchYield != null) ...[
+              row('Preço do lote ( unidades)', formatBrl(s.batchRevenueCents!)),
+              row(s.batchProfitCents! < 0 ? 'Prejuízo do lote' : 'Lucro do lote',
+                  formatBrl(s.batchProfitCents!.abs())),
+            ],
+            if (s.suggestedCents != null) row('Preço sugerido', formatBrl(s.suggestedCents!)),
           ],
         ),
       ),

@@ -329,6 +329,10 @@ class Measure {
   if (w == 'colhersopa') return (15, MeasureKind.volume);
   if (w == 'colhersobremesa') return (10, MeasureKind.volume);
   if (w == 'colhercha') return (5, MeasureKind.volume);
+  // "uma colher de manteiga" (sem dizer qual): colher de sopa.
+  if (RegExp(r'^colher(es)?$').hasMatch(w)) return (15, MeasureKind.volume);
+  // Pitada: quantidade minima (~0,5 g), so para o item nao ficar sem medida.
+  if (RegExp(r'^pitadas?$').hasMatch(w)) return (0.5, MeasureKind.mass);
   if (w == 'copoamericano') return (190, MeasureKind.volume);
   if (RegExp(r'^copos?$').hasMatch(w)) return (200, MeasureKind.volume);
   return null;

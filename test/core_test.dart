@@ -58,6 +58,8 @@ void main() {
       expect(formatBrl(123456789), 'R\$ 1.234.567,89');
       expect(speakBrl(1250), '12 reais e 50 centavos');
       expect(speakBrl(100), '1 real');
+      expect(speakBrl(50), '50 centavos');
+      expect(speakBrl(1), '1 centavo');
     });
   });
 

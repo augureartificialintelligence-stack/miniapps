@@ -328,7 +328,72 @@ class DialogMachine {
       'Oi! Eu sou seu assistente de vendas. Vou te ajudar a descobrir quanto cobrar. ';
 
   /// Nova conversa. Com cadastro: vai direto ao preco do produto. Sem: faz a triagem.
+  /// Ultima simulacao de preco (para a tela). Some quando um novo calculo comeca.
+  PriceSimulation? get simulation => _simulation;
+  PriceSimulation? _simulation;
+
+  /// "quero vender a unidade por 6 reais", "e se eu cobrar 7?", "vender o lote por 80":
+  /// calcula lucro e margem real com o preco escolhido. null = a fala nao e isso.
+  DialogResponse? _trySimulate(String input) {
+    final n = normalizePt(input);
+    if (!RegExp(r'\b(vender|vendo|venda|cobrar|cobro|cobrando|preco|custar|sair|e se)\b')
+        .hasMatch(n)) {
+      return null;
+    }
+    final cents = parsePriceWithPackage(input)?.cents ?? parseMoneyCents(input);
+    if (cents == null || cents <= 0) return null;
+    final unitCost = _unitCostExact();
+    if (unitCost == null) return null;
+    final y = _session.costs?.batchYield ?? _session.batchYield;
+    // Preco do lote ("o lote por 80 reais") vira preco da unidade.
+    final isLot = RegExp(r'\b(lote|fornada|tudo)\b').hasMatch(n) &&
+        !RegExp(r'\b(unidade|cada)\b').hasMatch(n);
+    final unitPrice = isLot && y != null && y > 0 ? (cents / y).round() : cents;
+    _simulation = PriceSimulation(
+      priceCents: unitPrice,
+      unitCostCents: unitCost,
+      suggestedCents: _suggestedUnitPrice(),
+      batchYield: y,
+    );
+    final lotNote =
+        isLot && y != null ? 'O lote de $y por ${speakBrl(cents)} dá a unidade a ${speakBrl(unitPrice)}. ' : '';
+    final next = _state == DialogState.offerDetail
+        ? ' Pode testar outro preço. $_offerText'
+        : ' Pode testar outro preço, ou diga: recomeçar.';
+    final text = '$lotNote${speakSimulation(_simulation!)}$next';
+    _lastPrompt = text;
+    return DialogResponse(text, _state);
+  }
+
+  /// Custo de producao de UMA unidade: da tabela de custo completa, se houver; senao,
+  /// do custo total informado dividido pela quantidade.
+  int? _unitCostExact() {
+    final t = _session.costs;
+    if (t != null &&
+        t.batchYield != null &&
+        t.batchYield! > 0 &&
+        t.materials.isNotEmpty &&
+        t.materials.every((m) => m.costCents != null)) {
+      return (t.batchCents / t.batchYield!).round();
+    }
+    final q = _session.quantity, c = _session.totalCostCents;
+    if (q == null || q < 1 || c == null) return null;
+    return (c / q).round();
+  }
+
+  int? _suggestedUnitPrice() {
+    final t = _session.costs;
+    if (t?.unitPriceCents != null && t!.materials.every((m) => m.costCents != null)) {
+      return t.unitPriceCents;
+    }
+    if (_session.quantity == null || _session.totalCostCents == null || _session.marginPercent == null) {
+      return null;
+    }
+    return _currentResult().unitPriceCents;
+  }
+
   DialogResponse start() {
+    _simulation = null;
     _resumeTo = null;
     _correctingOld = null;
     _interview = null;
@@ -360,6 +425,12 @@ class DialogMachine {
 
     // Na entrevista de custo, frases como "o frete custa 20" nao sao correcoes.
     if (_state == DialogState.costDetail) return _answer(input);
+
+    // Depois do resultado: "quero vender por 6 reais" simula o lucro com esse preco.
+    if (_state == DialogState.result || _state == DialogState.offerDetail) {
+      final sim = _trySimulate(input);
+      if (sim != null) return sim;
+    }
 
     final fix = parseCorrection(input);
     if (fix != null) {
@@ -620,11 +691,43 @@ class DialogMachine {
   }
 
   /// Grava a resposta; campos da triagem atualizam tambem o cadastro.
-  void _setField(DialogState field, Object? value) {
+  void _setField(DialogState field, Object? value, {bool rebuildDraft = true}) {
     _session = _session.withField(field, value);
+    if (field == DialogState.askMaterials && rebuildDraft) {
+      _session = _session.withCosts(_draftFromMaterials(value as String?));
+    }
     if (dialogOrder.indexOf(field) < dialogOrder.indexOf(DialogState.askQuantity)) {
       profile = _session.keepTriage();
     }
+  }
+
+  /// Ingredientes ditos/digitados viram a lista da tabela de custo na hora (com as
+  /// quantidades e partes faladas). Precos que ja existiam para o mesmo ingrediente
+  /// (foto da nota, custo detalhado anterior) sao mantidos.
+  CostBreakdown? _draftFromMaterials(String? text) {
+    final old = _session.costs;
+    final items = parseSpokenRecipe(text);
+    if (items.isEmpty && old == null) return null;
+    final t = old != null
+        ? CostBreakdown.fromJson(old.toJson())!
+        : CostBreakdown(batchYield: _session.batchYield);
+    final previous = [...t.materials];
+    t.materials.clear();
+    for (final it in items) {
+      final m = MaterialCost(it.name, used: it.used, part: it.part);
+      for (final p in previous) {
+        if (sameIngredient(p.name, it.name)) {
+          m
+            ..used ??= p.used
+            ..priceCents = p.priceCents
+            ..pack = p.pack
+            ..gramsPer = p.gramsPer;
+          break;
+        }
+      }
+      t.materials.add(m);
+    }
+    return t;
   }
 
   /// Valor atual de um campo (para log, correcoes e exemplos de aprendizado).
@@ -758,6 +861,7 @@ class DialogMachine {
       ));
 
   DialogResponse _finish() {
+    _simulation = null;
     final r = _currentResult();
     _state = DialogState.offerDetail;
     final y = _session.batchYield;
@@ -841,7 +945,8 @@ class DialogMachine {
     if (_session.hasProfile) profile = _session.keepTriage();
     if (_state == DialogState.askMaterials && recipe.isNotEmpty) {
       final names = recipe.map((r) => r.name).toSet().join(', ');
-      _setField(DialogState.askMaterials, names);
+      // A tabela ja recebeu a receita com quantidades: so guarda os nomes na ficha.
+      _setField(DialogState.askMaterials, names, rebuildDraft: false);
       return _advance(DialogState.askMaterials, '$ack Anotei: $names.');
     }
     return _say('$ack Eles entram na tabela de custo quando você detalhar o custo. '

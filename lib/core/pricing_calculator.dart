@@ -94,6 +94,65 @@ String speakBrl(int cents) {
   final reais = cents ~/ 100;
   final cs = cents % 100;
   final rPart = '$reais ${reais == 1 ? 'real' : 'reais'}';
+  final cPart = '$cs ${cs == 1 ? 'centavo' : 'centavos'}';
   if (cs == 0) return rPart;
-  return '$rPart e $cs ${cs == 1 ? 'centavo' : 'centavos'}';
+  if (reais == 0) return cPart; // "50 centavos", nao "0 reais e 50 centavos"
+  return '$rPart e $cPart';
+}
+
+/// Simulacao: a pessoa escolhe o preco ("quero vender por 6 reais") e o app mostra o
+/// lucro e a margem REAL desse preco, comparando com o preco sugerido.
+class PriceSimulation {
+  const PriceSimulation({
+    required this.priceCents,
+    required this.unitCostCents,
+    this.suggestedCents,
+    this.batchYield,
+  });
+
+  /// Preco por unidade escolhido pela pessoa.
+  final int priceCents;
+
+  /// Custo de producao de cada unidade (sem arredondar para cima).
+  final int unitCostCents;
+
+  /// Preco sugerido pela margem desejada (para comparar).
+  final int? suggestedCents;
+  final int? batchYield;
+
+  int get unitProfitCents => priceCents - unitCostCents;
+
+  /// Margem real sobre o preco (mesma definicao da margem pedida no app).
+  double get marginPercent => priceCents == 0 ? 0 : unitProfitCents * 100 / priceCents;
+
+  bool get isLoss => unitProfitCents < 0;
+
+  int? get batchRevenueCents => batchYield == null ? null : priceCents * batchYield!;
+  int? get batchProfitCents => batchYield == null ? null : unitProfitCents * batchYield!;
+}
+
+/// Resumo falado da simulacao de preco.
+String speakSimulation(PriceSimulation s) {
+  final b = StringBuffer('Vendendo a unidade por ${speakBrl(s.priceCents)}: cada unidade '
+      'custa ${speakBrl(s.unitCostCents)} para produzir, ');
+  if (s.isLoss) {
+    b.write('então você tem prejuízo de ${speakBrl(-s.unitProfitCents)} por unidade. '
+        'Atenção: esse preço fica abaixo do custo de produção.');
+  } else if (s.unitProfitCents == 0) {
+    b.write('então você empata: não tem lucro nem prejuízo.');
+  } else {
+    b.write('então você lucra ${speakBrl(s.unitProfitCents)} por unidade, uma margem de '
+        '${s.marginPercent.round()} por cento.');
+  }
+  if (s.batchYield != null && !s.isLoss) {
+    b.write(' No lote de ${s.batchYield} unidades, você recebe ${speakBrl(s.batchRevenueCents!)} '
+        'e lucra ${speakBrl(s.batchProfitCents!)}.');
+  }
+  final sug = s.suggestedCents;
+  if (sug != null && sug != s.priceCents) {
+    b.write(s.priceCents < sug
+        ? ' Esse preço está abaixo do sugerido, que é ${speakBrl(sug)}.'
+        : ' Esse preço está acima do sugerido, que é ${speakBrl(sug)}.');
+  }
+  return b.toString();
 }

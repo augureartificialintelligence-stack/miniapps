@@ -262,8 +262,11 @@ class CostInterview {
     _triage = materials;
     table.marginPercent = marginPercent;
     table.batchYield ??= batchYield;
-    // Receita importada por foto (ja tem ingredientes e partes): pula a pergunta das partes.
-    _step = draft != null && draft.materials.isNotEmpty ? _afterMaterialsStep() : CostStep.parts;
+    // Lista que ja tem quantidades, partes ou precos (fala corrida, foto): pula a pergunta
+    // das partes. So nomes ("arroz, feijao e frango"): ainda pergunta se ha partes.
+    final rich = draft != null &&
+        draft.materials.any((m) => m.used != null || m.part != null || m.priceCents != null);
+    _step = rich ? _afterMaterialsStep() : CostStep.parts;
     if (_step == CostStep.itemAmount) _item = _firstIncomplete() ?? 0;
   }
 
@@ -380,6 +383,7 @@ class CostInterview {
     switch (_step) {
       case CostStep.parts:
         if (no) {
+          // A lista (da triagem ou do rascunho) ja esta na tabela; senao, usa a triagem.
           if (table.materials.isEmpty && _triage.isNotEmpty) {
             table.materials.addAll(_triage.map(MaterialCost.new));
           }
@@ -397,6 +401,8 @@ class CostInterview {
               'Ou diga: não.');
         }
         _parts = [for (final p in parts) p[0].toUpperCase() + p.substring(1).toLowerCase()];
+        // Nomes soltos da triagem seriam repetidos nas partes: saem da tabela.
+        table.materials.removeWhere((m) => m.used == null && m.priceCents == null);
         _partIndex = 0;
         return _go(CostStep.partMaterials, 'Anotei as partes: ${_parts.join(', ')}.');
 
