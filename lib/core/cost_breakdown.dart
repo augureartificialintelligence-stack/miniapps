@@ -257,6 +257,7 @@ class CostInterview {
     required int marginPercent,
     this.sector,
     CostBreakdown? draft,
+    bool skipParts = false,
   }) : table = draft ?? CostBreakdown(batchYield: batchYield) {
     // Materiais da triagem so entram se a pessoa disser que o produto nao tem partes
     // (com partes, os ingredientes sao perguntados por parte e nao duplicam).
@@ -267,7 +268,8 @@ class CostInterview {
     // das partes. So nomes ("arroz, feijao e frango"): ainda pergunta se ha partes.
     final rich = draft != null &&
         draft.materials.any((m) => m.used != null || m.part != null || m.priceCents != null);
-    _step = rich ? _afterMaterialsStep() : CostStep.parts;
+    // Lista reaproveitada ("use esses ingredientes"): nao pergunta as partes de novo.
+    _step = rich || (skipParts && table.materials.isNotEmpty) ? _afterMaterialsStep() : CostStep.parts;
     // O item da pergunta e o primeiro incompleto (pode ja ter quantidade e so faltar preco).
     _item = _firstIncomplete() ?? 0;
   }

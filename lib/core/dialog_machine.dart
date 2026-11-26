@@ -418,6 +418,38 @@ class DialogMachine {
   /// Precos salvos oferecidos ("quer que eu use esses precos?"), aguardando sim/nao.
   List<KnownPrice>? _pendingFill;
 
+  /// Receita salva oferecida ("quer que eu use esses ingredientes?"), aguardando sim/nao.
+  SalesSession? _pendingSaved;
+
+  /// Usa os ingredientes (e precos) salvos. Na triagem, copia a ficha; no custo
+  /// detalhado, recomeca a tabela com eles e pergunta so o que falta.
+  DialogResponse _useSavedRecipe(SalesSession saved) {
+    // Na triagem copia a ficha; na oferta de detalhar e no custo, monta a tabela.
+    if (_state != DialogState.costDetail && _state != DialogState.offerDetail) {
+      return _applySaved(saved);
+    }
+    final table = saved.costs != null && saved.costs!.materials.isNotEmpty
+        ? CostBreakdown.fromJson(saved.costs!.toJson())!
+        : (CostBreakdown(batchYield: _session.batchYield)
+          ..importRecipe(parseSpokenRecipe(saved.materials)));
+    // Mantem custos extras ja respondidos nesta entrevista.
+    final cur = _interview?.table;
+    if (cur != null) {
+      table
+        ..packagingPerUnitCents ??= cur.packagingPerUnitCents
+        ..freightCents ??= cur.freightCents
+        ..wearCents ??= cur.wearCents
+        ..laborCents ??= cur.laborCents
+        ..laborHourlyCents ??= cur.laborHourlyCents
+        ..otherCents ??= cur.otherCents;
+    }
+    _session = _session.withCosts(table);
+    _interview = null;
+    final r = _startInterview(skipParts: true);
+    return _say(r.text.replaceFirst(
+        'Vamos montar a tabela de custo de um lote.', 'Pronto, usei os ingredientes salvos.'));
+  }
+
   /// Produto salvo aguardando "sim/nao" em [DialogState.askReuse].
   SalesSession? _recalled;
 
@@ -599,6 +631,25 @@ class DialogMachine {
       final one = _knownFor(n, known);
       if (one != null) return _retryOk('Tenho registrado: ${one.speak()}. $back');
     }
+    // Dados/receita salvos deste produto ("voce ja tem os dados?", "tem a receita salva?").
+    if (RegExp(r'\b(dados|receita|ingredientes|ficha|lista)\b').hasMatch(n) &&
+        RegExp(r'\b(tem|ja|salv\w*|registr\w*|lembra|guard\w*|anot\w*)\b').hasMatch(n)) {
+      final product = _session.product;
+      final saved = product == null
+          ? null
+          : recallProduct?.call(product, current: product, exact: true);
+      final names = saved == null
+          ? const <String>[]
+          : (saved.costs?.materials.isNotEmpty ?? false)
+              ? [for (final m in saved.costs!.materials) m.name]
+              : [for (final i in parseSpokenRecipe(saved.materials)) i.name];
+      if (saved == null || names.isEmpty) {
+        return _retryOk('Ainda não tenho a receita desse produto salva. $back');
+      }
+      _pendingSaved = saved;
+      return _retryOk('Tenho a ficha de ${saved.product} com ${names.length} ingredientes: '
+          '${names.join(', ')}. Quer que eu use esses ingredientes?');
+    }
     // O que falta preencher.
     if (RegExp(r'\b(falta|faltam|faltando|pendente|pendentes)\b').hasMatch(n)) {
       final missing = table?.materials.where((m) => m.costCents == null).toList() ?? const [];
@@ -669,6 +720,7 @@ class DialogMachine {
       ];
       final q = _interview!.importDocuments(const [], matched);
       final added = _interview!.table.materials.where((m) => m.costCents != null).length - before;
+      _saveInterviewProgress();
       return _say('Pronto, usei $added ${added == 1 ? 'preço salvo' : 'preços salvos'}. $q');
     }
     final t = _session.costs;
@@ -759,6 +811,14 @@ class DialogMachine {
   }
 
   DialogResponse handle(String input) {
+    // Resposta para a oferta de usar a receita salva ("voce ja tem os dados?").
+    final pendingSaved = _pendingSaved;
+    if (pendingSaved != null) {
+      _pendingSaved = null;
+      final yn = parseYesNo(input);
+      if (yn == YesNo.yes) return _useSavedRecipe(pendingSaved);
+      if (yn == YesNo.no) return _say('Tudo bem. ${_question(_state)}');
+    }
     // Resposta para a oferta de usar precos salvos.
     final fill = _pendingFill;
     if (fill != null) {
@@ -891,9 +951,16 @@ class DialogMachine {
     if (t.isEmpty) return false;
     // Pergunta da pessoa e intencional: envia (o app responde e volta a pergunta atual).
     if (isQuestion(t)) return true;
+    // Informacao "pelo nome do campo" so conta se o valor for valido para o campo
+    // ("ao mesmo tempo e so..." nao e o tempo de producao).
+    final validStatement = parseFieldStatements(t).entries.any((e) {
+      if (!correctableStates.contains(e.key)) return false;
+      final p = _parseField(e.key, e.value, false);
+      return p.error == null && p.value != null;
+    });
     if (parseCommand(t) != null ||
         parseCorrection(t) != null ||
-        parseFieldStatements(t).isNotEmpty ||
+        validStatement ||
         parseSaleUnit(t)?.strong == true) {
       return true;
     }
@@ -921,10 +988,25 @@ class DialogMachine {
             RegExp(r'\b(detalhar|detalhe|tabela)\b').hasMatch(normalizePt(t)) ||
             _shareWords.hasMatch(normalizePt(t)) ||
             parseMoneyCents(t) != null;
+      case DialogState.askCompany:
+      case DialogState.askSector:
+      case DialogState.askProduct:
+        // Nome e curto; frase longa e conversa de fundo (espera a pessoa enviar).
+        return _words(t) <= _autoNameWords;
       default:
         return true; // texto livre (empresa, ramo, produto, ingredientes...)
     }
   }
+
+  static int _words(String s) => s.trim().split(RegExp(r'\s+')).where((w) => w.isNotEmpty).length;
+
+  /// Ate quantas palavras um nome (empresa, ramo, produto) e enviado sozinho.
+  static const _autoNameWords = 6;
+
+  /// Mais que isso nao e nome: e conversa captada pelo microfone.
+  static const _maxNameWords = 10;
+  static const _longName = 'Essa frase ficou longa para um nome. Pode falar só o nome? '
+      'Se preferir, digite.';
 
   /// Volta para uma resposta anterior (lapis na tela ou "corrigir <campo>").
   /// Depois de responder, a conversa continua de onde estava.
@@ -992,7 +1074,10 @@ class DialogMachine {
         final it = _interview!;
         final r = it.answer(input);
         if (!r.ok) return _retry(r.text);
-        if (!it.done) return _say(r.text);
+        if (!it.done) {
+          _saveInterviewProgress();
+          return _say(r.text);
+        }
         return _finishInterview(r.text);
 
       default:
@@ -1008,6 +1093,7 @@ class DialogMachine {
   _Parsed _parseField(DialogState field, String input, bool skip) {
     switch (field) {
       case DialogState.askCompany:
+        if (!skip && _words(input) > _maxNameWords) return const _Parsed.error(_longName);
         final v = skip ? null : parseCompanyName(input);
         return v == null && !skip
             ? const _Parsed.error(
@@ -1020,6 +1106,7 @@ class DialogMachine {
                 'salgados ou marmitas. Se preferir, diga: pular.')
             : _Parsed(v);
       case DialogState.askProduct:
+        if (!skip && _words(input) > _maxNameWords) return const _Parsed.error(_longName);
         final v = skip ? null : parseProductName(input);
         return v == null
             ? const _Parsed.error('Não entendi o nome. Qual produto você quer vender?')
@@ -1519,7 +1606,7 @@ class DialogMachine {
   }
 
   /// Comeca a entrevista do custo detalhado (materiais do cadastro ja viram linhas).
-  DialogResponse _startInterview() {
+  DialogResponse _startInterview({bool skipParts = false}) {
     final s = _session;
     if (s.marginPercent == null) {
       return _retry('Primeiro preciso da margem de lucro. ${_question(_state)}');
@@ -1536,9 +1623,20 @@ class DialogMachine {
       marginPercent: s.marginPercent!,
       sector: s.sector,
       draft: draft,
+      skipParts: skipParts,
     );
     return _goto(DialogState.costDetail,
         'Vamos montar a tabela de custo de um lote. ${_interview!.question()}');
+  }
+
+  /// Salva a tabela da entrevista no cadastro A CADA resposta (nao so no fim): uma
+  /// reinstalacao, o app fechado ou uma nova conversa nao perdem os precos ja dados.
+  /// Ao detalhar de novo, a entrevista continua do que falta.
+  void _saveInterviewProgress() {
+    final it = _interview;
+    if (it == null) return;
+    _session = _session.withCosts(CostBreakdown.fromJson(it.table.toJson()));
+    if (_session.hasProfile) profile = _session.keepTriage();
   }
 
   /// Fim da entrevista: guarda a tabela no cadastro e mostra o custo por unidade.
@@ -1577,7 +1675,9 @@ class DialogMachine {
     }
     final ack = 'Li ${read.join(' e ')}.';
     if (_state == DialogState.costDetail) {
-      return _say('$ack ${_interview!.importDocuments(recipe, purchases)}');
+      final q = _interview!.importDocuments(recipe, purchases);
+      _saveInterviewProgress();
+      return _say('$ack $q');
     }
     final table = _session.costs != null
         ? CostBreakdown.fromJson(_session.costs!.toJson())!

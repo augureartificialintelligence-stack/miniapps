@@ -602,7 +602,8 @@ bool isQuestion(String input) {
   if (t.isEmpty) return false;
   final n = normalizePt(t);
   if (t.endsWith('?')) return true;
-  return RegExp(r'^(e\s+)?(voce|vc|tu)\s+(tem|sabe|lembra|guardou|consegue|pode|salvou|registrou)\b|'
+  return RegExp(r'^(e\s+)?(voce|vc|tu)\s+((ja|nao|tambem|ainda)\s+)?'
+          r'(tem|sabe|lembra|guardou|consegue|pode|salvou|registrou|anotou)\b|'
           r'^(e\s+)?(qual|quais|quanto|quantos|quantas|como|onde|cade|por que|porque|sera que|'
           r'tem como|existe|o que|me diz|me fala)\b')
       .hasMatch(n);

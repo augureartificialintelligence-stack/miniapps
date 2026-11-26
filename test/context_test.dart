@@ -140,6 +140,39 @@ void main() {
       expect(m.looksLikeAnswer('2 xícaras'), isTrue);
     });
 
+    test('frase real de conversa paralela na confirmacao nao e enviada sozinha', () {
+      final m = DialogMachine(profile: const SalesSession(product: 'bolo'))..start();
+      m.handle('12');
+      m.handle('20');
+      m.handle('80');
+      expect(m.state, DialogState.confirm);
+      expect(
+          m.looksLikeAnswer(
+              'mais utilização de acaba usando dois aplicativos ao mesmo tempo é só multi melhor né'),
+          isFalse);
+      expect(m.looksLikeAnswer('dividir a tela'), isFalse);
+      expect(m.looksLikeAnswer('o tempo é 2 horas'), isTrue); // informacao valida
+    });
+
+    test('frase real: conversa de fundo nao vira nome da empresa', () {
+      const fala = 'não consigo localizá-la tem como fazer um baratinho para ela uma dor é '
+          'uma 12 esses de segunda a terceira linha que ela não vai usar os recursos';
+      final m = DialogMachine()..start();
+      expect(m.state, DialogState.askCompany);
+      expect(m.looksLikeAnswer(fala), isFalse); // nao envia sozinho
+      expect(m.looksLikeAnswer('Bolinho feliz'), isTrue);
+      final r = m.handle(fala); // mesmo enviada, nao vira nome
+      expect(r.understood, isFalse);
+      expect(m.state, DialogState.askCompany);
+      expect(m.session.company, isNull);
+      m.handle('Bolinho feliz');
+      m.handle('confeitaria');
+      expect(m.handle(fala).understood, isFalse);
+      expect(m.session.product, isNull);
+      expect(m.handle('bolo de cenoura com cobertura de chocolate').state,
+          isNot(DialogState.askProduct));
+    });
+
     test('correcoes e comandos sempre parecem resposta', () {
       final m = DialogMachine(profile: const SalesSession(product: 'bolo'))..start();
       expect(m.looksLikeAnswer('voltar'), isTrue);

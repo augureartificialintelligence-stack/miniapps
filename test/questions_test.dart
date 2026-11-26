@@ -116,6 +116,74 @@ void main() {
     expect(llm.prompt, contains('NUNCA invente precos'));
   });
 
+  test('frase real: "você já tem os dados?" no meio do custo usa a lista salva', () {
+    const saved = SalesSession(
+      company: 'Bolinho feliz',
+      product: 'bolo de cenoura',
+      materials: 'cenoura ovos óleo de soja açúcar refinado farinha de trigo fermento '
+          'químico em pó sal chocolate em pó 50% Cacau manteiga leite integral',
+      batchYield: 12,
+      productionMinutes: 70,
+    );
+    final m = DialogMachine(
+      profile: saved,
+      recallProduct: (r, {current, exact = false}) => saved,
+    )..start();
+    for (final a in ['12', '20', '80', 'sim', 'sim', 'massa e cobertura']) {
+      m.handle(a);
+    }
+    expect(m.lastPrompt, contains('Para a massa'));
+    final r = m.handle('você já tem os dados?');
+    expect(r.understood, isTrue);
+    expect(r.text, contains('Tenho a ficha de bolo de cenoura com 10 ingredientes: cenoura, '
+        'ovos, óleo de soja, açúcar refinado'));
+    expect(r.text, contains('Quer que eu use esses ingredientes?'));
+    final r2 = m.handle('sim');
+    expect(r2.text, startsWith('Pronto, usei os ingredientes salvos.'));
+    expect(r2.text, contains('Quanto de cenoura')); // pula as partes; pede o que falta
+    expect(m.costTable!.materials, hasLength(10));
+  });
+
+  test('frase real: "você já tem os dados" (sem ?) na oferta de detalhar', () {
+    expect(isQuestion('você já tem os dados'), isTrue);
+    expect(isQuestion('voce nao tem a receita'), isTrue);
+    const saved = SalesSession(
+      company: 'Bolinho feliz',
+      product: 'bolo de cenoura',
+      materials: 'cenoura ovos óleo de soja açúcar refinado farinha de trigo',
+      batchYield: 12,
+    );
+    final m = DialogMachine(
+      profile: saved,
+      recallProduct: (r, {current, exact = false}) => saved,
+    )..start();
+    for (final a in ['12', 'r\$ 20', '80%', 'sim']) {
+      m.handle(a);
+    }
+    expect(m.state, DialogState.offerDetail);
+    final r = m.handle('você já tem os dados');
+    expect(r.understood, isTrue);
+    expect(r.text, contains('Tenho a ficha de bolo de cenoura com 5 ingredientes'));
+    final r2 = m.handle('sim');
+    expect(r2.state, DialogState.costDetail);
+    expect(r2.text, startsWith('Pronto, usei os ingredientes salvos.'));
+    expect(r2.text, contains('Quanto de cenoura')); // sem perguntar as partes
+  });
+
+  test('"tem a receita salva?" na triagem copia a ficha', () {
+    const saved = SalesSession(
+        product: 'bolo de cenoura', materials: '2 xícaras de farinha e 3 ovos', batchYield: 12);
+    final m = DialogMachine(recallProduct: (r, {current, exact = false}) => saved)..start();
+    m.handle('Bolinho feliz');
+    m.handle('confeitaria');
+    // produto com outro nome nao oferece sozinho; a pergunta busca pelo nome atual
+    m.handle('bolo de cenoura de pote');
+    final r = m.handle('tem a receita salva?');
+    expect(r.text, contains('Quer que eu use esses ingredientes?'));
+    expect(m.handle('sim').state, DialogState.askQuantity);
+    expect(m.session.materials, '2 xícaras de farinha e 3 ovos');
+  });
+
   test('"quanto devo cobrar?" depois do calculo', () {
     final m = DialogMachine(profile: const SalesSession(product: 'bolo', batchYield: 12))
       ..start();
