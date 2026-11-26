@@ -1,6 +1,8 @@
 import 'cost_breakdown.dart';
+import 'document_parser.dart';
 import 'pricing_calculator.dart';
 import 'pt_br_parser.dart';
+import 'sectors.dart';
 
 /// Estados do fluxo "assistente de vendas / precificacao".
 /// Uma pergunta por vez, linguagem simples (requisito do documento AUGURE).
@@ -8,6 +10,9 @@ import 'pt_br_parser.dart';
 /// Ordem: triagem (empresa, produto, especificacoes de producao) e depois o preco.
 enum DialogState {
   askCompany,
+
+  /// Ramo do negocio (confeitaria, salgados, marmitas...).
+  askSector,
   askProduct,
   askMaterials,
   askBatchYield,
@@ -29,6 +34,7 @@ enum DialogState {
 /// Ordem linear das perguntas (usada por "voltar" e pelas correcoes).
 const dialogOrder = [
   DialogState.askCompany,
+  DialogState.askSector,
   DialogState.askProduct,
   DialogState.askMaterials,
   DialogState.askBatchYield,
@@ -44,6 +50,7 @@ const dialogOrder = [
 /// Perguntas cujas respostas podem ser corrigidas depois.
 const correctableStates = {
   DialogState.askCompany,
+  DialogState.askSector,
   DialogState.askProduct,
   DialogState.askMaterials,
   DialogState.askBatchYield,
@@ -57,6 +64,7 @@ const correctableStates = {
 class SalesSession {
   const SalesSession({
     this.company,
+    this.sector,
     this.product,
     this.materials,
     this.batchYield,
@@ -70,6 +78,9 @@ class SalesSession {
 
   // Triagem (opcionais, exceto o produto).
   final String? company;
+
+  /// Ramo do negocio.
+  final String? sector;
   final String? product;
   final String? materials;
   final int? batchYield;
@@ -92,6 +103,7 @@ class SalesSession {
 
   SalesSession copyWith({
     String? company,
+    String? sector,
     String? product,
     String? materials,
     int? batchYield,
@@ -103,6 +115,7 @@ class SalesSession {
   }) =>
       SalesSession(
         company: company ?? this.company,
+        sector: sector ?? this.sector,
         product: product ?? this.product,
         materials: materials ?? this.materials,
         batchYield: batchYield ?? this.batchYield,
@@ -111,11 +124,13 @@ class SalesSession {
         quantity: quantity ?? this.quantity,
         totalCostCents: totalCostCents ?? this.totalCostCents,
         marginPercent: marginPercent ?? this.marginPercent,
+        costs: costs,
       );
 
   /// Copia com UM campo trocado, aceitando null (para "pular" numa correcao).
   SalesSession withField(DialogState field, Object? value) => SalesSession(
         company: field == DialogState.askCompany ? value as String? : company,
+        sector: field == DialogState.askSector ? value as String? : sector,
         product: field == DialogState.askProduct ? value as String? : product,
         materials: field == DialogState.askMaterials ? value as String? : materials,
         batchYield: field == DialogState.askBatchYield ? value as int? : batchYield,
@@ -131,6 +146,7 @@ class SalesSession {
 
   SalesSession withCosts(CostBreakdown? table) => SalesSession(
         company: company,
+        sector: sector,
         product: product,
         materials: materials,
         batchYield: table?.batchYield ?? batchYield,
@@ -148,6 +164,7 @@ class SalesSession {
   /// Mantem a triagem (cadastro); zera so os numeros do preco.
   SalesSession keepTriage() => SalesSession(
         company: company,
+        sector: sector,
         product: product,
         materials: materials,
         batchYield: batchYield,
@@ -158,6 +175,7 @@ class SalesSession {
 
   Map<String, Object?> toJson() => {
         'company': company,
+        'sector': sector,
         'product': product,
         'materials': materials,
         'batchYield': batchYield,
@@ -171,6 +189,7 @@ class SalesSession {
 
   static SalesSession fromJson(Map<String, Object?> j) => SalesSession(
         company: j['company'] as String?,
+        sector: j['sector'] as String?,
         product: j['product'] as String?,
         materials: j['materials'] as String?,
         batchYield: (j['batchYield'] as num?)?.toInt(),
@@ -220,6 +239,7 @@ const _correctionTrigger =
 /// Palavras que identificam o campo (texto normalizado, sem acento).
 const _fieldKeywords = <DialogState, String>{
   DialogState.askCompany: r'empresa|loja|negocio|marca',
+  DialogState.askSector: r'ramo|setor|segmento|area',
   DialogState.askProduct: r'produto',
   DialogState.askMaterials: r'ingredientes?|materia(l|is)|materia prima',
   DialogState.askBatchYield: r'rendimento|rende|lotes?',
@@ -418,6 +438,12 @@ class DialogMachine {
             ? const _Parsed.error(
                 'Não entendi. Qual é o nome da sua empresa? Se não tiver, diga: pular.')
             : _Parsed(v);
+      case DialogState.askSector:
+        final v = skip ? null : parseSector(input);
+        return v == null && !skip
+            ? const _Parsed.error('Não entendi o ramo. Diga, por exemplo: confeitaria, '
+                'salgados ou marmitas. Se preferir, diga: pular.')
+            : _Parsed(v);
       case DialogState.askProduct:
         final v = skip ? null : parseProductName(input);
         return v == null
@@ -478,6 +504,8 @@ class DialogMachine {
     switch (field) {
       case DialogState.askCompany:
         return v == null ? 'Sem problema.' : 'Prazer, $v!';
+      case DialogState.askSector:
+        return v == null ? 'Tudo bem.' : 'Ramo: $v.';
       case DialogState.askProduct:
         return 'Certo, $v.';
       case DialogState.askMaterials:
@@ -507,6 +535,8 @@ class DialogMachine {
     switch (field) {
       case DialogState.askCompany:
         return 'Corrigido: empresa $v.';
+      case DialogState.askSector:
+        return 'Corrigido: ramo $v.';
       case DialogState.askProduct:
         return 'Corrigido: produto $v.';
       case DialogState.askMaterials:
@@ -602,6 +632,7 @@ class DialogMachine {
 
   Object? _valueOf(DialogState field) => switch (field) {
         DialogState.askCompany => _session.company,
+        DialogState.askSector => _session.sector,
         DialogState.askProduct => _session.product,
         DialogState.askMaterials => _session.materials,
         DialogState.askBatchYield => _session.batchYield,
@@ -624,11 +655,15 @@ class DialogMachine {
     switch (s) {
       case DialogState.askCompany:
         return 'Para começar, qual é o nome da sua empresa ou do seu negócio?';
+      case DialogState.askSector:
+        return 'Qual é o ramo do seu negócio? Por exemplo: confeitaria, salgados, marmitas, '
+            'panificação, açaí, bebidas, artesanato ou cosméticos.';
       case DialogState.askProduct:
         return 'Qual produto você quer vender?';
 
       case DialogState.askMaterials:
-        return 'Do que $product é feito? Fale os principais ingredientes ou materiais.';
+        return 'Do que $product é feito? Fale os principais ingredientes ou materiais, '
+            'por exemplo: ${materialsExample(_session.sector)}. Ou mande uma foto da receita.';
       case DialogState.askBatchYield:
         return 'Quantas unidades rende cada produção? Por exemplo: uma fornada rende vinte.';
       case DialogState.askProductionTime:
@@ -725,10 +760,15 @@ class DialogMachine {
   DialogResponse _finish() {
     final r = _currentResult();
     _state = DialogState.offerDetail;
+    final y = _session.batchYield;
+    final lot = y != null && y > 0
+        ? 'O preço do lote de $y unidades é ${speakBrl(r.unitPriceCents * y)}. '
+        : '';
     final text = 'Para ${r.input.quantity} ${_session.product}, cada unidade custa '
-        '${speakBrl(r.unitCostCents)}. Cobre ${speakBrl(r.unitPriceCents)} por unidade. '
-        'Vendendo tudo, você recebe ${speakBrl(r.totalRevenueCents)} e fica com '
-        '${speakBrl(r.profitCents)} de lucro. '
+        '${speakBrl(r.unitCostCents)} para produzir. O preço da unidade é '
+        '${speakBrl(r.unitPriceCents)}. $lot'
+        'Vendendo as ${r.input.quantity} unidades, você recebe '
+        '${speakBrl(r.totalRevenueCents)} e fica com ${speakBrl(r.profitCents)} de lucro. '
         'Esse cálculo considera só os custos que você informou. $_offerText';
     _lastPrompt = text;
     return DialogResponse(text, _state, result: r);
@@ -740,11 +780,18 @@ class DialogMachine {
     if (s.marginPercent == null) {
       return _retry('Primeiro preciso da margem de lucro. ${_question(_state)}');
     }
+    // Tabela ja salva ou rascunho das fotos: continua dela (copia, para nao mexer no
+    // cadastro antes de terminar).
+    final draft = s.costs != null && s.costs!.materials.isNotEmpty
+        ? CostBreakdown.fromJson(s.costs!.toJson())
+        : null;
     _interview = CostInterview(
       materials: splitMaterials(s.materials),
       batchYield: s.batchYield,
       productionMinutes: s.productionMinutes,
       marginPercent: s.marginPercent!,
+      sector: s.sector,
+      draft: draft,
     );
     return _goto(DialogState.costDetail,
         'Vamos montar a tabela de custo de um lote. ${_interview!.question()}');
@@ -760,6 +807,45 @@ class DialogMachine {
     final text = '${ack.isEmpty ? '' : '$ack '}${speakBreakdown(table)}';
     _lastPrompt = text;
     return DialogResponse(text, _state, breakdown: table);
+  }
+
+  /// Tabela de custo para a tela: a da entrevista em andamento ou a salva/rascunho.
+  CostBreakdown? get costTable => _interview?.table ?? _session.costs;
+
+  /// Acrescenta o que foi lido nas fotos (receita e/ou compra) e segue a conversa.
+  /// Na entrevista de custo, as fotos preenchem a tabela e ela continua do que falta.
+  /// Na pergunta dos materiais, a receita responde a pergunta. Em qualquer outro ponto,
+  /// fica guardado como rascunho da tabela de custo.
+  DialogResponse importDocuments(List<RecipeItem> recipe, List<PurchaseItem> purchases) {
+    final read = [
+      if (recipe.isNotEmpty)
+        '${recipe.length} ${recipe.length == 1 ? 'ingrediente' : 'ingredientes'} da receita',
+      if (purchases.isNotEmpty)
+        '${purchases.length} ${purchases.length == 1 ? 'preço' : 'preços'} da compra',
+    ];
+    if (read.isEmpty) {
+      return _retry('Não consegui ler ingredientes nem preços nas fotos. Tente uma foto mais '
+          'de perto e com boa luz. ${_question(_state)}');
+    }
+    final ack = 'Li ${read.join(' e ')}.';
+    if (_state == DialogState.costDetail) {
+      return _say('$ack ${_interview!.importDocuments(recipe, purchases)}');
+    }
+    final table = _session.costs != null
+        ? CostBreakdown.fromJson(_session.costs!.toJson())!
+        : CostBreakdown(batchYield: _session.batchYield);
+    table
+      ..importRecipe(recipe)
+      ..importPurchases(purchases);
+    _session = _session.withCosts(table);
+    if (_session.hasProfile) profile = _session.keepTriage();
+    if (_state == DialogState.askMaterials && recipe.isNotEmpty) {
+      final names = recipe.map((r) => r.name).toSet().join(', ');
+      _setField(DialogState.askMaterials, names);
+      return _advance(DialogState.askMaterials, '$ack Anotei: $names.');
+    }
+    return _say('$ack Eles entram na tabela de custo quando você detalhar o custo. '
+        '${_question(_state)}');
   }
 
   DialogResponse _goto(DialogState s, String text) {

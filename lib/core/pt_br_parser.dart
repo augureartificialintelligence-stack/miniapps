@@ -324,8 +324,32 @@ class Measure {
   if (RegExp(r'^(ml|mililitros?)$').hasMatch(w)) return (1, MeasureKind.volume);
   if (RegExp(r'^duzias?$').hasMatch(w)) return (12, MeasureKind.unit);
   if (RegExp(r'^(unidades?|un|und|unid|pecas?)$').hasMatch(w)) return (1, MeasureKind.unit);
+  // Medidas caseiras (volume padrao brasileiro).
+  if (RegExp(r'^(xicaras?|xic|xics)$').hasMatch(w)) return (240, MeasureKind.volume);
+  if (w == 'colhersopa') return (15, MeasureKind.volume);
+  if (w == 'colhersobremesa') return (10, MeasureKind.volume);
+  if (w == 'colhercha') return (5, MeasureKind.volume);
+  if (w == 'copoamericano') return (190, MeasureKind.volume);
+  if (RegExp(r'^copos?$').hasMatch(w)) return (200, MeasureKind.volume);
   return null;
 }
+
+/// Junta medidas de varias palavras numa so ("colher de sopa" -> "colhersopa") e
+/// converte fracoes ("1/2", "½", "meia xicara") em decimal.
+String _prepKitchen(String t) => t
+    .replaceAll('½', ' 0.5 ')
+    .replaceAll('¼', ' 0.25 ')
+    .replaceAll('¾', ' 0.75 ')
+    .replaceAll('⅓', ' 0.33 ')
+    .replaceAllMapped(RegExp(r'(\d+)\s*/\s*(\d+)'),
+        (m) => ' ${(int.parse(m[1]!) / int.parse(m[2]!)).toStringAsFixed(2)} ')
+    .replaceAll(RegExp(r'\bcolher(es|inhas?)?\s+(de\s+)?(sopa|sp)\b'), ' colhersopa ')
+    .replaceAll(RegExp(r'\bcolher(es)?\s+(de\s+)?sobremesa\b'), ' colhersobremesa ')
+    .replaceAll(RegExp(r'\bcolher(es|inhas?)?\s+(de\s+)?(cha|ch)\b'), ' colhercha ')
+    .replaceAll(RegExp(r'\b(c\s+sopa|csp|cs)\b'), ' colhersopa ')
+    .replaceAll(RegExp(r'\b(c\s+cha|cch|cc)\b'), ' colhercha ')
+    .replaceAll(RegExp(r'\bcopos?\s+americanos?\b'), ' copoamericano ')
+    .replaceAllMapped(RegExp(r'\bmeia\s+(xicara|colher|copo)'), (m) => '0.5 ${m[1]}');
 
 /// Pontuacao que nao e separador decimal, e "1kg" -> "1 kg".
 String _prepNumbers(String input) => normalizePt(input)
@@ -335,6 +359,12 @@ String _prepNumbers(String input) => normalizePt(input)
 double? _numberOf(List<String> tokens) {
   final words = tokens.where((w) => w.isNotEmpty).toList();
   if (words.isEmpty) return null;
+  // "1 e 0.5" (de "1 e 1/2"): soma as partes.
+  if (words.length > 1 && words.every((w) => w == 'e' || RegExp(r'^\d+([.,]\d+)?$').hasMatch(w))) {
+    return words
+        .where((w) => w != 'e')
+        .fold<double>(0, (s, w) => s + (double.tryParse(w.replaceAll(',', '.')) ?? 0));
+  }
   if (words.length == 1 && RegExp(r'^\d').hasMatch(words.first)) {
     final w = words.first;
     // "1.500" = mil e quinhentos; "1.5" / "1,5" = um e meio.
@@ -347,7 +377,7 @@ double? _numberOf(List<String> tokens) {
 /// Quantidade usada/comprada: "2 quilos", "500 g", "meio quilo", "quilo e meio",
 /// "1,5 kg", "meio litro", "6 ovos" (numero sem unidade = unidades), "uma duzia".
 Measure? parseMeasure(String input) {
-  var t = _prepNumbers(input)
+  var t = _prepKitchen(_prepNumbers(input))
       .replaceAll(RegExp(r'\bmeio\s+(quilo|kg|kilo)\b'), '500 gramas')
       .replaceAll(RegExp(r'\bmeio\s+litro\b'), '500 ml')
       .replaceAll(RegExp(r'\bmeia\s+duzia\b'), '6 unidades');
@@ -491,6 +521,20 @@ String speakMeasure(Measure m) {
       if (m.amount >= 1000) {
         final l = m.amount / 1000;
         return '${_num(l)} ${l == 1 ? 'litro' : 'litros'}';
+      }
+      // Medidas de cozinha quando o volume e multiplo delas (240 ml = 1 xicara).
+      if (m.amount % 120 == 0) {
+        final x = m.amount / 240;
+        if (x == 0.5) return 'meia xícara';
+        return '${_num(x)} ${x == 1 ? 'xícara' : 'xícaras'}';
+      }
+      if (m.amount < 120 && m.amount % 15 == 0) {
+        final c = m.amount / 15;
+        return '${_num(c)} ${c == 1 ? 'colher' : 'colheres'} de sopa';
+      }
+      if (m.amount < 15 && m.amount % 5 == 0) {
+        final c = m.amount / 5;
+        return '${_num(c)} ${c == 1 ? 'colher' : 'colheres'} de chá';
       }
       return '${_num(m.amount)} mililitros';
     case MeasureKind.unit:

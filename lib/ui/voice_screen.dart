@@ -1,20 +1,25 @@
+import 'package:image_picker/image_picker.dart';
 import 'package:material_ui/material_ui.dart';
 
-import '../core/dialog_machine.dart';
 import '../core/cost_breakdown.dart';
+import '../core/dialog_machine.dart';
 import '../core/pricing_calculator.dart';
-import '../core/pt_br_parser.dart' show speakDuration, speakMeasure;
+import '../core/pt_br_parser.dart' show Measure, MeasureKind, speakDuration, speakMeasure;
 import '../llm/llm_engine.dart';
 import '../llm/smart_dialog.dart';
 import '../memory/conversation_store.dart';
+import '../vision/text_scanner.dart';
 import '../voice/voice_engines.dart';
+import 'photo_import.dart';
 
+/// Mensagem da conversa. Nao aparece na tela (a tela mostra so a pergunta atual e as
+/// listas), mas e salva para retomar a conversa se o app fechar.
 class ChatMessage {
   ChatMessage(this.text, {required this.fromAssistant, this.answered});
   final String text;
   final bool fromAssistant;
 
-  /// Para respostas do usuario: a pergunta que esta mensagem respondeu (permite corrigir).
+  /// Para respostas do usuario: a pergunta que esta mensagem respondeu.
   final DialogState? answered;
 
   Map<String, Object?> toJson() =>
@@ -30,8 +35,12 @@ class ChatMessage {
   }
 }
 
-/// Tela unica: botao grande de falar, alternativa de digitar, leitura em voz alta e
-/// confirmacao da transcricao antes de agir (riscos de erro de fala do documento AUGURE).
+/// Tela unica. Em vez do historico da conversa, mostra:
+/// - a pergunta atual do assistente, em destaque;
+/// - a ficha do produto (respostas da triagem), com lapis para corrigir cada item;
+/// - a lista de ingredientes/materiais com valores, que vai sendo montada;
+/// - o resultado (preco da unidade e preco do lote).
+/// Embaixo: falar (botao grande), digitar ou mandar foto da receita/compra.
 class VoiceScreen extends StatefulWidget {
   const VoiceScreen({
     super.key,
@@ -40,18 +49,21 @@ class VoiceScreen extends StatefulWidget {
     required this.dialog,
     this.llm,
     this.store,
+    this.scanner,
   });
 
   final SttEngine stt;
   final TtsEngine tts;
   final SmartDialog dialog;
 
-  /// Memoria local (retomar conversa, empresa, fichas). Sem ela, o app funciona igual,
-  /// so nao lembra nada entre aberturas.
+  /// Memoria local (retomar conversa, empresa, produtos). Opcional.
   final ConversationStore? store;
 
   /// LLM local opcional. Sem ele (ou antes do download) o app usa so o fluxo deterministico.
   final InstallableLlm? llm;
+
+  /// Leitor de texto das fotos. Sem ele, o botao de foto nao aparece.
+  final TextScanner? scanner;
 
   @override
   State<VoiceScreen> createState() => _VoiceScreenState();
@@ -60,16 +72,22 @@ class VoiceScreen extends StatefulWidget {
 class _VoiceScreenState extends State<VoiceScreen> {
   final _messages = <ChatMessage>[];
   final _textCtrl = TextEditingController();
-  final _scroll = ScrollController();
 
   bool _sttAvailable = false;
   bool _listening = false;
-  bool _busy = false; // aguardando o LLM local
+  bool _busy = false; // aguardando o LLM local ou a leitura de fotos
   int? _downloadPercent; // != null enquanto baixa o modelo
-  String? _pendingTranscript; // aguardando Confirmar/Corrigir
+  String? _pendingTranscript; // aguardando "Esta certo" / "Editar texto"
+
+  /// Pergunta atual do assistente (o que aparece em destaque).
+  String _question = '';
+
+  /// A ultima fala nao foi entendida: a pergunta aparece como pedido de repeticao.
+  bool _retry = false;
+
   PricingResult? _lastResult;
-  SalesSession? _lastSession; // triagem do produto calculado (ficha)
-  CostBreakdown? _lastBreakdown; // tabela de custo detalhado
+
+  DialogMachine get _machine => widget.dialog.machine;
 
   @override
   void initState() {
@@ -83,17 +101,12 @@ class _VoiceScreenState extends State<VoiceScreen> {
     if (!mounted) return;
     setState(() => _sttAvailable = ok);
     _assistantSays(_resumeOrStart());
-    // Carrega o modelo se ja foi baixado antes (silencioso; falha = sem LLM).
     final llm = widget.llm;
     if (llm != null) {
       await llm.load();
       if (mounted) setState(() {});
     }
-    if (!ok) {
-      _addMessage(ChatMessage(
-          'O microfone não está disponível neste aparelho. Você pode digitar abaixo.',
-          fromAssistant: true));
-    }
+    if (!ok) _notice('O microfone não está disponível neste aparelho. Você pode digitar.');
   }
 
   @override
@@ -101,78 +114,58 @@ class _VoiceScreenState extends State<VoiceScreen> {
     widget.stt.stop();
     widget.tts.stop();
     _textCtrl.dispose();
-    _scroll.dispose();
     super.dispose();
   }
 
-  void _addMessage(ChatMessage m) {
-    setState(() => _messages.add(m));
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) {
-        _scroll.animateTo(_scroll.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
-      }
-    });
+  void _notice(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
   }
 
   /// Retoma a conversa salva (se recente) ou comeca uma nova.
   DialogResponse _resumeOrStart() {
     final saved = widget.store?.resumable();
-    if (saved != null && widget.dialog.machine.restore(saved.dialog)) {
-      final old = saved.messages.map(ChatMessage.fromJson).whereType<ChatMessage>();
-      setState(() => _messages.addAll(old));
-      return widget.dialog.machine.resumePrompt();
+    if (saved != null && _machine.restore(saved.dialog)) {
+      _messages.addAll(saved.messages.map(ChatMessage.fromJson).whereType<ChatMessage>());
+      return _machine.resumePrompt();
     }
     return widget.dialog.start();
   }
 
   void _assistantSays(DialogResponse r) {
-    _addMessage(ChatMessage(r.text, fromAssistant: true));
-    final machine = widget.dialog.machine;
+    _messages.add(ChatMessage(r.text, fromAssistant: true));
     setState(() {
-      if (r.result != null) {
-        _lastResult = r.result;
-        _lastSession = machine.session;
-        _lastBreakdown = null;
-      }
-      if (r.breakdown != null) {
-        _lastBreakdown = r.breakdown;
-        _lastSession = machine.session;
-      }
+      _question = r.text;
+      _retry = !r.understood;
+      if (r.result != null) _lastResult = r.result;
       if (dialogOrder.contains(r.state) && r.state != DialogState.result) {
-        // Novo calculo em andamento: o resumo antigo sai da tela. (Na oferta e na
-        // entrevista de custo o resumo continua visivel.)
+        // Novo calculo em andamento: o resultado antigo sai da tela.
         _lastResult = null;
-        _lastSession = null;
-        _lastBreakdown = null;
       }
     });
     widget.tts.speak(r.text);
     _persist(r);
   }
 
-  /// Salva a conversa (para retomar) e, no resultado, a ficha do produto.
+  /// Salva a conversa (para retomar), o cadastro e o ultimo preco.
   Future<void> _persist(DialogResponse r) async {
     final store = widget.store;
     if (store == null) return;
-    final machine = widget.dialog.machine;
-    await store.saveProfile(machine.profile);
-    if (r.result != null) await store.rememberResult(machine.session, r.result!);
-    await store.saveConversation(
-        machine.toJson(), [for (final m in _messages) m.toJson()]);
+    await store.saveProfile(_machine.profile);
+    if (r.result != null) await store.rememberResult(_machine.session, r.result!);
+    await store.saveConversation(_machine.toJson(), [for (final m in _messages) m.toJson()]);
   }
 
-  /// Lapis numa resposta antiga: volta para aquela pergunta e depois continua de onde
-  /// estava. O texto antigo vai para o campo, para editar se quiser.
-  void _correctAnswer(ChatMessage m) {
-    final field = m.answered;
-    if (field == null || _busy) return;
+  /// Lapis num item da ficha: volta para aquela pergunta e depois continua de onde
+  /// estava. O valor atual vai para a caixa de texto, para editar se quiser.
+  void _correctField(DialogState field, String? current) {
+    if (_busy) return;
     _cancelListening();
     widget.tts.stop();
-    _assistantSays(widget.dialog.machine.correct(field));
+    _assistantSays(_machine.correct(field));
     setState(() {
       _pendingTranscript = null;
-      _textCtrl.text = m.text;
+      _textCtrl.text = current ?? '';
     });
   }
 
@@ -184,8 +177,6 @@ class _VoiceScreenState extends State<VoiceScreen> {
       _messages.clear();
       _pendingTranscript = null;
       _lastResult = null;
-      _lastSession = null;
-      _lastBreakdown = null;
       _textCtrl.clear();
     });
     _assistantSays(widget.dialog.start());
@@ -195,8 +186,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
   /// "Meus produtos" (ficha, tabela de custo e ultimo preco) para voltar depois.
   Future<void> _newConversation() async {
     if (_busy) return;
-    final machine = widget.dialog.machine;
-    final current = machine.profile.product;
+    final current = _machine.profile.product;
     if (current != null) {
       final ok = await showDialog<bool>(
         context: context,
@@ -216,7 +206,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
       if (ok != true || !mounted) return;
     }
     await widget.store?.startNewProduct();
-    machine.profile = SalesSession(company: machine.profile.company);
+    _machine.profile = SalesSession(company: _machine.profile.company);
     _restartScreen();
   }
 
@@ -259,7 +249,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
     );
     if (chosen == null || chosen.id == activeId || !mounted) return;
     await store.activate(chosen.id);
-    widget.dialog.machine.profile = chosen.session;
+    _machine.profile = chosen.session;
     _restartScreen();
   }
 
@@ -268,10 +258,9 @@ class _VoiceScreenState extends State<VoiceScreen> {
     if (t.isEmpty || _busy) return;
     // Enviou com o microfone ainda ligado: desliga e descarta o resto da escuta.
     _cancelListening();
-    final state = widget.dialog.machine.state;
-    _addMessage(ChatMessage(t,
-        fromAssistant: false,
-        answered: correctableStates.contains(state) ? state : null));
+    final state = _machine.state;
+    _messages.add(ChatMessage(t,
+        fromAssistant: false, answered: correctableStates.contains(state) ? state : null));
     setState(() => _busy = true);
     try {
       final r = await widget.dialog.handle(t);
@@ -279,6 +268,51 @@ class _VoiceScreenState extends State<VoiceScreen> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  /// Fotos da receita ou da compra: le, mostra o que achou, pergunta se tem mais
+  /// imagens e entrega tudo para a conversa.
+  Future<void> _addPhotos() async {
+    final scanner = widget.scanner;
+    if (scanner == null || _busy) return;
+    _cancelListening();
+    widget.tts.stop();
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text('Foto da receita (ingredientes) ou da compra (nota, cupom)'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.photo_camera_outlined),
+            title: const Text('Tirar foto'),
+            onTap: () => Navigator.pop(ctx, ImageSource.camera),
+          ),
+          ListTile(
+            leading: const Icon(Icons.photo_library_outlined),
+            title: const Text('Escolher da galeria (uma ou várias)'),
+            onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+          ),
+        ]),
+      ),
+    );
+    if (source == null || !mounted) return;
+    final result = await Navigator.push<PhotoImport>(
+      context,
+      MaterialPageRoute(
+        builder: (_) =>
+            PhotoImportPage(scanner: scanner, first: source, onAsk: widget.tts.speak),
+      ),
+    );
+    widget.tts.stop();
+    if (result == null || !mounted) return;
+    _messages.add(ChatMessage(
+        '[fotos: ${result.recipe.length} ingredientes, ${result.purchases.length} preços]',
+        fromAssistant: false));
+    _assistantSays(_machine.importDocuments(result.recipe, result.purchases));
   }
 
   Future<void> _downloadModel() async {
@@ -290,13 +324,9 @@ class _VoiceScreenState extends State<VoiceScreen> {
         if (mounted) setState(() => _downloadPercent = p);
       });
       await llm.load();
-      _addMessage(ChatMessage(
-          'Pronto! O assistente inteligente está ativo e funciona sem internet.',
-          fromAssistant: true));
+      _notice('Pronto! O assistente inteligente está ativo e funciona sem internet.');
     } catch (_) {
-      _addMessage(ChatMessage(
-          'Não consegui baixar o modelo agora. O app continua funcionando normalmente.',
-          fromAssistant: true));
+      _notice('Não consegui baixar o modelo agora. O app continua funcionando normalmente.');
     } finally {
       if (mounted) setState(() => _downloadPercent = null);
     }
@@ -331,7 +361,6 @@ class _VoiceScreenState extends State<VoiceScreen> {
   }
 
   /// Muda a cada escuta nova ou cancelada: resultados atrasados de uma escuta antiga
-  /// (ex.: o microfone terminando pelo silencio DEPOIS que a resposta ja foi enviada)
   /// sao descartados, para nao virarem resposta da pergunta seguinte.
   int _listenGen = 0;
 
@@ -358,13 +387,18 @@ class _VoiceScreenState extends State<VoiceScreen> {
       _listening = true;
       _pendingTranscript = null;
     });
+    // Texto que ja estava na caixa (ex.: fechou o cartao no X): a fala nova e
+    // ACRESCENTADA, em vez de apagar o que a pessoa ja tinha falado ou digitado.
+    final before = _textCtrl.text.trim();
+    String join(String heard) => [before, heard.trim()].where((s) => s.isNotEmpty).join(' ');
     await widget.stt.listen((text, isFinal) {
       if (!mounted || gen != _listenGen) return;
       setState(() {
-        _textCtrl.text = text;
+        final full = join(text);
+        _textCtrl.text = full;
         if (isFinal) {
           _listening = false;
-          _pendingTranscript = text.trim().isEmpty ? null : text;
+          _pendingTranscript = full.isEmpty ? null : full;
         }
       });
     });
@@ -379,23 +413,14 @@ class _VoiceScreenState extends State<VoiceScreen> {
     if (t != null) _submit(t);
   }
 
-  void _correctTranscript() {
-    // Mantem o texto no campo para edicao, sem reiniciar o fluxo.
-    setState(() => _pendingTranscript = null);
-  }
-
-  /// "X" do cartao: descarta o que o microfone ouviu (nao envia nada). A conversa
-  /// continua na mesma pergunta, para falar de novo ou digitar.
-  void _dismissTranscript() {
-    setState(() {
-      _pendingTranscript = null;
-      _textCtrl.clear();
-    });
-  }
+  /// "Editar texto" e o "X": fecham o cartao e deixam o que foi falado na caixa de texto
+  /// (nada e apagado nem enviado). Tocar no microfone de novo continua o texto.
+  void _closeTranscript() => setState(() => _pendingTranscript = null);
 
   /// Nome curto da pergunta atual (mostra a quem o texto ouvido vai responder).
   static String _questionLabel(DialogState s) => switch (s) {
         DialogState.askCompany => 'nome da empresa',
+        DialogState.askSector => 'ramo do negócio',
         DialogState.askProduct => 'produto',
         DialogState.askMaterials => 'materiais ou ingredientes',
         DialogState.askBatchYield => 'rendimento por lote',
@@ -413,15 +438,16 @@ class _VoiceScreenState extends State<VoiceScreen> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final company = widget.dialog.machine.session.company;
+    final s = _machine.session;
+    final table = _machine.costTable;
     return Scaffold(
       appBar: AppBar(
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text('Assistente de Vendas'),
-            if (company != null)
-              Text(company,
+            if (s.company != null)
+              Text(s.company!,
                   style: Theme.of(context)
                       .textTheme
                       .bodyMedium
@@ -447,85 +473,39 @@ class _VoiceScreenState extends State<VoiceScreen> {
           children: [
             _llmBanner(context),
             Expanded(
-              child: ListView.builder(
-                controller: _scroll,
+              child: ListView(
                 padding: const EdgeInsets.all(16),
-                itemCount: _messages.length +
-                    (_lastResult != null || _lastBreakdown != null ? 1 : 0),
-                itemBuilder: (_, i) {
-                  if (i == _messages.length) {
-                    return _ResultCard(_lastResult, _lastSession, _lastBreakdown);
-                  }
-                  final m = _messages[i];
-                  return _Bubble(m,
-                      onCorrect: m.answered != null && !_busy
-                          ? () => _correctAnswer(m)
-                          : null);
-                },
+                children: [
+                  _QuestionCard(
+                    text: _question,
+                    retry: _retry,
+                    busy: _busy,
+                    onReplay: () => widget.tts.speak(_question),
+                  ),
+                  _ProfileCard(
+                      session: s,
+                      onCorrect: _busy || _listening ? null : _correctField),
+                  if (table != null && table.materials.isNotEmpty) _CostTableCard(table),
+                  if (_lastResult != null) _ResultCard(_lastResult!, s.batchYield),
+                ],
               ),
             ),
-            if (_pendingTranscript != null)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                child: Card(
-                  color: scheme.secondaryContainer,
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Expanded(
-                              child: Padding(
-                                padding: const EdgeInsets.only(top: 8),
-                                child: Text('Entendi: "$_pendingTranscript"',
-                                    style: Theme.of(context).textTheme.titleMedium),
-                              ),
-                            ),
-                            IconButton(
-                              tooltip: 'Fechar',
-                              onPressed: _dismissTranscript,
-                              icon: const Icon(Icons.close),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                            'Isso responde: ${_questionLabel(widget.dialog.machine.state)}',
-                            style: Theme.of(context).textTheme.bodySmall),
-                        const SizedBox(height: 8),
-                        Row(children: [
-                          Expanded(
-                            child: FilledButton(
-                                onPressed: _confirmTranscript,
-                                child: const Text('Está certo')),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: OutlinedButton(
-                                onPressed: _correctTranscript,
-                                child: const Text('Editar texto')),
-                          ),
-                        ]),
-                        const SizedBox(height: 4),
-                        Text(
-                            'Para mudar uma resposta anterior, toque no lápis ao lado dela.',
-                            style: Theme.of(context).textTheme.bodySmall),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
+            if (_pendingTranscript != null) _transcriptCard(context, scheme),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
               child: Row(children: [
+                if (widget.scanner != null) ...[
+                  IconButton.outlined(
+                    tooltip: 'Foto da receita ou da compra',
+                    onPressed: _busy ? null : _addPhotos,
+                    icon: const Icon(Icons.add_a_photo_outlined),
+                  ),
+                  const SizedBox(width: 8),
+                ],
                 Expanded(
                   child: TextField(
                     controller: _textCtrl,
-                    // Quebra de linha: o texto cresce ate 5 linhas e depois rola, para a
-                    // pessoa ver tudo o que esta escrevendo (ou o que o microfone ouviu).
+                    // Quebra de linha: o texto cresce ate 5 linhas e depois rola.
                     minLines: 1,
                     maxLines: 5,
                     keyboardType: TextInputType.text,
@@ -586,108 +566,202 @@ class _VoiceScreenState extends State<VoiceScreen> {
       ),
     );
   }
+
+  Widget _transcriptCard(BuildContext context, ColorScheme scheme) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Card(
+          color: scheme.secondaryContainer,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text('Entendi: "$_pendingTranscript"',
+                            style: Theme.of(context).textTheme.titleMedium),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Fechar (o texto fica na caixa)',
+                      onPressed: _closeTranscript,
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text('Isso responde: ${_questionLabel(_machine.state)}',
+                    style: Theme.of(context).textTheme.bodySmall),
+                const SizedBox(height: 8),
+                Row(children: [
+                  Expanded(
+                    child: FilledButton(
+                        onPressed: _confirmTranscript, child: const Text('Está certo')),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: OutlinedButton(
+                        onPressed: _closeTranscript, child: const Text('Editar texto')),
+                  ),
+                ]),
+              ],
+            ),
+          ),
+        ),
+      );
 }
 
-class _Bubble extends StatelessWidget {
-  const _Bubble(this.m, {this.onCorrect});
-  final ChatMessage m;
-
-  /// Lapis para corrigir esta resposta (so em respostas do usuario).
-  final VoidCallback? onCorrect;
+/// Pergunta atual do assistente, em destaque.
+class _QuestionCard extends StatelessWidget {
+  const _QuestionCard(
+      {required this.text, required this.retry, required this.busy, required this.onReplay});
+  final String text;
+  final bool retry;
+  final bool busy;
+  final VoidCallback onReplay;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final bubble = Container(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      padding: const EdgeInsets.all(12),
-      constraints: const BoxConstraints(maxWidth: 300),
-      decoration: BoxDecoration(
-        color: m.fromAssistant ? scheme.surfaceContainerHighest : scheme.primaryContainer,
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Text(m.text, style: const TextStyle(fontSize: 18)),
-    );
-    if (m.fromAssistant) return Align(alignment: Alignment.centerLeft, child: bubble);
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.end,
-      children: [
-        if (onCorrect != null)
-          IconButton(
-            tooltip: 'Corrigir esta resposta',
-            onPressed: onCorrect,
-            icon: Icon(Icons.edit_outlined, color: scheme.onSurfaceVariant),
-          ),
-        Flexible(child: bubble),
-      ],
-    );
-  }
-}
-
-class _ResultCard extends StatelessWidget {
-  const _ResultCard(this.r, this.s, this.costs);
-  final PricingResult? r;
-  final SalesSession? s;
-
-  /// Tabela do custo detalhado (quando a pessoa fez a entrevista de custo).
-  final CostBreakdown? costs;
-
-  @override
-  Widget build(BuildContext context) {
-    final s = this.s;
-    final specs = <(String, String)>[
-      if (s?.company != null) ('Empresa', s!.company!),
-      if (s?.product != null) ('Produto', s!.product!),
-      if (s?.materials != null) ('Materiais', s!.materials!),
-      if (s?.batchYield != null) ('Rende por lote', '${s!.batchYield} unidades'),
-      if (s?.productionMinutes != null)
-        ('Tempo por lote', speakDuration(s!.productionMinutes!)),
-      if (s?.characteristics != null) ('Características', s!.characteristics!),
-    ];
     return Card(
-      margin: const EdgeInsets.symmetric(vertical: 8),
+      color: retry ? scheme.tertiaryContainer : scheme.primaryContainer,
+      margin: const EdgeInsets.only(bottom: 12),
       child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
+        padding: const EdgeInsets.fromLTRB(16, 12, 8, 16),
+        child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (specs.isNotEmpty) ...[
-              Text('Ficha do produto', style: Theme.of(context).textTheme.titleLarge),
-              const SizedBox(height: 8),
-              for (final (label, value) in specs) _spec(context, label, value),
-              const Divider(height: 24),
-            ],
-            if (r != null) ...[
-              Text('Resumo', style: Theme.of(context).textTheme.titleLarge),
-              const SizedBox(height: 8),
-              _row('Custo por unidade', formatBrl(r!.unitCostCents)),
-              _row('Preço sugerido', formatBrl(r!.unitPriceCents)),
-              _row('Total vendido', formatBrl(r!.totalRevenueCents)),
-              _row('Lucro', formatBrl(r!.profitCents)),
-            ],
-            if (costs != null) ...[
-              if (r != null) const Divider(height: 24),
-              ..._costTable(context, costs!),
-            ],
+            Expanded(
+              child: busy
+                  ? const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 8),
+                      child: LinearProgressIndicator(),
+                    )
+                  : Text(text,
+                      style: TextStyle(
+                          fontSize: 20,
+                          height: 1.35,
+                          color: retry ? scheme.onTertiaryContainer : scheme.onPrimaryContainer)),
+            ),
+            IconButton(
+              tooltip: 'Ouvir de novo',
+              onPressed: busy ? null : onReplay,
+              icon: const Icon(Icons.volume_up_outlined),
+            ),
           ],
         ),
       ),
     );
   }
+}
 
-  /// Tabela de custo de producao do lote e o resultado por unidade.
-  List<Widget> _costTable(BuildContext context, CostBreakdown t) {
-    final muted = Theme.of(context).textTheme.bodySmall?.copyWith(
-        color: Theme.of(context).colorScheme.onSurfaceVariant);
+/// Ficha do produto: o que ja foi respondido na triagem, com lapis para corrigir.
+class _ProfileCard extends StatelessWidget {
+  const _ProfileCard({required this.session, required this.onCorrect});
+  final SalesSession session;
+  final void Function(DialogState field, String? current)? onCorrect;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = session;
+    final rows = <(DialogState, String, String)>[
+      if (s.company != null) (DialogState.askCompany, 'Empresa', s.company!),
+      if (s.sector != null) (DialogState.askSector, 'Ramo', s.sector!),
+      if (s.product != null) (DialogState.askProduct, 'Produto', s.product!),
+      if (s.materials != null) (DialogState.askMaterials, 'Ingredientes', s.materials!),
+      if (s.batchYield != null)
+        (DialogState.askBatchYield, 'Rende por lote', '${s.batchYield} unidades'),
+      if (s.productionMinutes != null)
+        (DialogState.askProductionTime, 'Tempo por lote', speakDuration(s.productionMinutes!)),
+      if (s.characteristics != null)
+        (DialogState.askCharacteristics, 'Características', s.characteristics!),
+      if (s.quantity != null) (DialogState.askQuantity, 'Quantidade', '${s.quantity} unidades'),
+      if (s.totalCostCents != null)
+        (DialogState.askCost, 'Custo total', formatBrl(s.totalCostCents!)),
+      if (s.marginPercent != null) (DialogState.askMargin, 'Margem', '${s.marginPercent}%'),
+    ];
+    if (rows.isEmpty) return const SizedBox.shrink();
+    final muted = Theme.of(context)
+        .textTheme
+        .labelMedium
+        ?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant);
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 4, 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Ficha do produto', style: Theme.of(context).textTheme.titleMedium),
+            for (final (field, label, value) in rows)
+              Row(
+                children: [
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(label, style: muted),
+                          Text(value, style: const TextStyle(fontSize: 16)),
+                        ],
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Corrigir $label',
+                    onPressed: onCorrect == null ? null : () => onCorrect!(field, value),
+                    icon: const Icon(Icons.edit_outlined, size: 20),
+                  ),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Lista de ingredientes/materiais (por parte do produto) com quantidade, preco e custo
+/// no lote; no fim, custo do lote, custo da unidade, preco da unidade e preco do lote.
+class _CostTableCard extends StatelessWidget {
+  const _CostTableCard(this.t);
+  final CostBreakdown t;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final muted = theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant);
+    final parts = t.parts;
+    final groups = <(String?, List<MaterialCost>)>[
+      if (parts.isEmpty)
+        (null, t.materials)
+      else ...[
+        for (final p in parts) (p, t.materials.where((m) => m.part == p).toList()),
+        if (t.materials.any((m) => m.part == null))
+          ('Outros', t.materials.where((m) => m.part == null).toList()),
+      ],
+    ];
+
     String detail(MaterialCost m) {
-      final used = m.used != null ? 'usa ${speakMeasure(m.used!)}' : '';
+      final grams = m.usedGrams;
+      final used = m.used != null
+          ? 'usa ${speakMeasure(m.used!)}'
+              '${grams != null ? ' (≈ ${speakMeasure(Measure(grams.roundToDouble(), MeasureKind.mass))})' : ''}'
+          : 'falta a quantidade';
       final paid = m.priceCents != null && m.pack != null
           ? 'paga ${formatBrl(m.priceCents!)} por ${speakMeasure(m.pack!)}'
-          : '';
-      return [used, paid].where((s) => s.isNotEmpty).join(' · ');
+          : m.priceCents != null
+              ? 'paga ${formatBrl(m.priceCents!)} (falta o tamanho)'
+              : 'falta o preço';
+      return '$used · $paid';
     }
 
-    Widget item(String name, String? sub, int cents) => Padding(
+    Widget line(String name, String? sub, String value, {bool bold = false}) => Padding(
           padding: const EdgeInsets.symmetric(vertical: 3),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -696,65 +770,127 @@ class _ResultCard extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(name, style: const TextStyle(fontSize: 16)),
+                    Text(name,
+                        style: TextStyle(
+                            fontSize: 16, fontWeight: bold ? FontWeight.bold : null)),
                     if (sub != null && sub.isNotEmpty) Text(sub, style: muted),
                   ],
                 ),
               ),
               const SizedBox(width: 8),
-              Text(formatBrl(cents)),
+              Text(value, style: TextStyle(fontWeight: bold ? FontWeight.bold : null)),
             ],
           ),
         );
 
-    return [
-      Text('Custo de produção do lote', style: Theme.of(context).textTheme.titleLarge),
-      if (t.batchYield != null) Text('Lote de ${t.batchYield} unidades', style: muted),
-      const SizedBox(height: 8),
-      for (final m in t.materials)
-        if (m.costCents != null) item(m.name, detail(m), m.costCents!),
-      if (t.packagingCents > 0)
-        item('Embalagens', '${formatBrl(t.packagingPerUnitCents!)} por unidade',
-            t.packagingCents),
-      if ((t.freightCents ?? 0) > 0) item('Frete e transporte', null, t.freightCents!),
-      if ((t.wearCents ?? 0) > 0)
-        item('Gás, energia e desgaste', null, t.wearCents!),
-      if ((t.laborCents ?? 0) > 0)
-        item(
-            'Pró-labore',
-            t.laborHourlyCents != null
-                ? '${formatBrl(t.laborHourlyCents!)} por hora'
-                : null,
-            t.laborCents!),
-      if ((t.otherCents ?? 0) > 0) item('Outros custos', null, t.otherCents!),
-      const Divider(height: 16),
-      _row('Custo do lote', formatBrl(t.batchCents)),
-      if (t.unitCostCents != null) _row('Custo por unidade', formatBrl(t.unitCostCents!)),
-      if (t.unitPriceCents != null)
-        _row('Preço sugerido (margem ${t.marginPercent}%)', formatBrl(t.unitPriceCents!)),
-      if (t.unitProfitCents != null) _row('Lucro por unidade', formatBrl(t.unitProfitCents!)),
-    ];
-  }
-
-  /// Linha de texto livre: rotulo em cima, valor embaixo (valores podem ser longos).
-  Widget _spec(BuildContext context, String label, String value) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
+    final complete = t.materials.every((m) => m.costCents != null);
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(label,
-                style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant)),
-            Text(value, style: const TextStyle(fontSize: 16)),
+            Text('Ingredientes e custos do lote', style: theme.textTheme.titleMedium),
+            if (t.batchYield != null) Text('Lote de ${t.batchYield} unidades', style: muted),
+            for (final (part, items) in groups) ...[
+              if (part != null) ...[
+                const SizedBox(height: 8),
+                Row(children: [
+                  Expanded(
+                    child: Text(part,
+                        style: theme.textTheme.titleSmall
+                            ?.copyWith(color: theme.colorScheme.primary)),
+                  ),
+                  Text(formatBrl(items.fold(0, (s, m) => s + (m.costCents ?? 0))),
+                      style: theme.textTheme.titleSmall),
+                ]),
+              ],
+              for (final m in items)
+                line(m.name, detail(m), m.costCents != null ? formatBrl(m.costCents!) : '—'),
+            ],
+            if (t.packagingCents > 0)
+              line('Embalagens', '${formatBrl(t.packagingPerUnitCents!)} por unidade',
+                  formatBrl(t.packagingCents)),
+            if ((t.freightCents ?? 0) > 0)
+              line('Frete e transporte', null, formatBrl(t.freightCents!)),
+            if ((t.wearCents ?? 0) > 0)
+              line('Gás, energia e desgaste', null, formatBrl(t.wearCents!)),
+            if ((t.laborCents ?? 0) > 0)
+              line(
+                  'Pró-labore',
+                  t.laborHourlyCents != null
+                      ? '${formatBrl(t.laborHourlyCents!)} por hora'
+                      : null,
+                  formatBrl(t.laborCents!)),
+            if ((t.otherCents ?? 0) > 0) line('Outros custos', null, formatBrl(t.otherCents!)),
+            const Divider(height: 20),
+            line('Custo do lote', complete ? null : 'parcial: faltam dados de alguns itens',
+                formatBrl(t.batchCents),
+                bold: true),
+            if (t.unitCostCents != null)
+              line('Custo de produção da unidade', null, formatBrl(t.unitCostCents!)),
+            if (t.unitPriceCents != null) ...[
+              const Divider(height: 20),
+              line('Preço da unidade', 'margem de ${t.marginPercent}%',
+                  formatBrl(t.unitPriceCents!),
+                  bold: true),
+              line('Preço do lote', '${t.batchYield} unidades', formatBrl(t.batchPriceCents!),
+                  bold: true),
+              line('Lucro por unidade', null, formatBrl(t.unitProfitCents!)),
+              line('Lucro do lote', null, formatBrl(t.batchProfitCents!)),
+            ],
           ],
         ),
-      );
+      ),
+    );
+  }
+}
 
-  Widget _row(String a, String b) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 2),
+/// Resultado do calculo: preco da unidade separado do preco do lote.
+class _ResultCard extends StatelessWidget {
+  const _ResultCard(this.r, this.batchYield);
+  final PricingResult r;
+  final int? batchYield;
+
+  @override
+  Widget build(BuildContext context) {
+    final y = batchYield;
+    final q = r.input.quantity;
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Preço', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 8),
+            _row(context, 'Custo de produção da unidade', formatBrl(r.unitCostCents)),
+            _row(context, 'Preço da unidade', formatBrl(r.unitPriceCents), big: true),
+            if (y != null && y > 0)
+              _row(context, 'Preço do lote ($y unidades)', formatBrl(r.unitPriceCents * y),
+                  big: true),
+            if (y != q) _row(context, 'Total das $q unidades', formatBrl(r.totalRevenueCents)),
+            _row(context, 'Lucro (nas $q unidades)', formatBrl(r.profitCents)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _row(BuildContext context, String a, String b, {bool big = false}) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [Text(a), Text(b, style: const TextStyle(fontWeight: FontWeight.bold))],
+          children: [
+            Expanded(child: Text(a, style: TextStyle(fontSize: big ? 17 : 15))),
+            Text(b,
+                style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: big ? 18 : 15,
+                    color: big ? Theme.of(context).colorScheme.primary : null)),
+          ],
         ),
       );
 }

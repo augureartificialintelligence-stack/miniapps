@@ -26,6 +26,10 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>A câmera é usada para fotografar a receita ou a nota de compra e ler os ingredientes e preços.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>A galeria é usada para escolher fotos da receita ou da nota de compra.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>O microfone é usado para você falar com o assistente de vendas.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>

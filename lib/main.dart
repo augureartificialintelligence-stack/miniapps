@@ -7,6 +7,7 @@ import 'llm/smart_dialog.dart';
 import 'llm/utterance_interpreter.dart';
 import 'memory/conversation_store.dart';
 import 'ui/voice_screen.dart';
+import 'vision/text_scanner.dart';
 import 'voice/system_voice.dart';
 
 Future<void> main() async {
@@ -39,6 +40,9 @@ class AugureMiniApp extends StatefulWidget {
 
 class _AugureMiniAppState extends State<AugureMiniApp> {
   final _llm = EdgeAiLlmEngine();
+
+  /// Leitor de texto das fotos (receita e nota de compra), no aparelho e offline.
+  final _scanner = MlKitTextScanner();
   late final SmartDialog _dialog = _buildDialog();
 
   SmartDialog _buildDialog() {
@@ -68,6 +72,7 @@ class _AugureMiniAppState extends State<AugureMiniApp> {
   @override
   void dispose() {
     _llm.dispose();
+    _scanner.dispose();
     super.dispose();
   }
 
@@ -94,6 +99,7 @@ class _AugureMiniAppState extends State<AugureMiniApp> {
         dialog: _dialog,
         llm: _llm,
         store: widget.store,
+        scanner: _scanner,
       ),
     );
   }

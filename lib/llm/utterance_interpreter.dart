@@ -66,6 +66,7 @@ class UtteranceInterpreter {
     switch (state) {
       // Texto livre: o parser deterministico ja aceita qualquer fala nao vazia.
       case DialogState.askCompany:
+      case DialogState.askSector:
       case DialogState.askMaterials:
       case DialogState.askCharacteristics:
       // Entrevista de custo: parsers proprios (quantidades e precos).

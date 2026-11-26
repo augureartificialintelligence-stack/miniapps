@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 /// Passa pela triagem (empresa, produto, especificacoes) ate a pergunta de quantidade.
 void triage(DialogMachine m) {
   m.handle('Doces da Ana');
+  m.handle('marmitaria');
   m.handle('marmitas');
   m.handle('arroz, feijão e frango');
   m.handle('uma panela rende vinte');
@@ -154,7 +155,8 @@ void main() {
     test('triagem completa e fluxo ate o resultado', () {
       final m = DialogMachine();
       expect(m.start().state, DialogState.askCompany);
-      expect(m.handle('minha empresa se chama doces da ana').state, DialogState.askProduct);
+      expect(m.handle('minha empresa se chama doces da ana').state, DialogState.askSector);
+      expect(m.handle('eu faço marmitas').state, DialogState.askProduct);
       expect(m.handle('quero vender marmitas').state, DialogState.askMaterials);
       expect(m.handle('arroz, feijão e frango').state, DialogState.askBatchYield);
       expect(m.handle('uma panela rende vinte').state, DialogState.askProductionTime);
@@ -169,6 +171,7 @@ void main() {
 
       final s = m.session;
       expect(s.company, 'Doces da Ana');
+      expect(s.sector, 'Marmitas e refeições');
       expect(s.product, 'marmitas');
       expect(s.materials, 'arroz, feijão e frango');
       expect(s.batchYield, 20);
@@ -178,8 +181,9 @@ void main() {
 
     test('perguntas opcionais podem ser puladas; produto nao', () {
       final m = DialogMachine()..start();
-      expect(m.handle('pular').state, DialogState.askProduct);
+      expect(m.handle('pular').state, DialogState.askSector);
       expect(m.session.company, isNull);
+      expect(m.handle('pular').state, DialogState.askProduct);
       expect(m.handle('pular').state, DialogState.askProduct); // produto e obrigatorio
       m.handle('bolo de pote');
       expect(m.handle('não sei').state, DialogState.askBatchYield);
@@ -211,6 +215,7 @@ void main() {
 
       final m2 = DialogMachine()..start();
       m2.handle('Doces da Ana');
+      m2.handle('confeitaria');
       m2.handle('bolos');
       m2.handle('farinha');
       m2.handle('vinte');

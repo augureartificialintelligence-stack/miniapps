@@ -49,3 +49,7 @@ app.*.map.json
 
 # Modelos de LLM baixados manualmente (nunca versionar arquivos de ~1 GB)
 *.gguf
+
+# Artefatos de build do Gradle/Kotlin dentro de android/
+/android/build/
+/android/.kotlin/

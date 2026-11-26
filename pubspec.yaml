@@ -21,6 +21,8 @@ dependencies:
   # (flutter_gemma foi renomeado para flutter_edge_ai.)
   flutter_edge_ai: ^2.7.1
   flutter_edge_ai_llama: ^0.2.0
+  google_mlkit_text_recognition: ^1.0.3
+  image_picker: ^1.2.4
   # Fase 3 (nao incluido): STT whisper.cpp / sherpa-onnx e TTS Piper pt-BR.
 
 dev_dependencies:

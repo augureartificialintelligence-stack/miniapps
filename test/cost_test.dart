@@ -106,10 +106,22 @@ void main() {
       expect(t.unitPriceCents, 993); // 13900 / 0,7 = 19857,15 -> /20 = 992,86 -> 993
     });
 
-    test('unidade de medida diferente nao calcula (pergunta de novo)', () {
-      final m = MaterialCost('ovos',
+    test('converte unidade/volume para peso pela tabela; desconhecido nao calcula', () {
+      // 6 ovos (~50 g cada) de um preco por quilo: 300 g de 1 kg a R$ 12 = R$ 3,60
+      final ovos = MaterialCost('ovos',
           used: const Measure(6, un), priceCents: 1200, pack: const Measure(1000, g));
-      expect(m.costCents, isNull);
+      expect(ovos.costCents, 360);
+      // 2 xicaras de farinha de trigo (~120 g cada) de um pacote de 1 kg a R$ 6
+      final farinha = MaterialCost('farinha de trigo',
+          used: const Measure(480, ml), priceCents: 600, pack: const Measure(1000, g));
+      expect(farinha.costCents, 144);
+      expect(farinha.usedGrams, 240);
+      // ingrediente fora da tabela: precisa perguntar quanto pesa
+      final x = MaterialCost('pasta americana',
+          used: const Measure(240, ml), priceCents: 3000, pack: const Measure(1000, g));
+      expect(x.costCents, isNull);
+      x.gramsPer = 1.2;
+      expect(x.costCents, 864);
     });
   });
 
@@ -118,6 +130,8 @@ void main() {
       final m = atOffer();
       var r = m.handle('sim');
       expect(r.state, DialogState.costDetail);
+      expect(r.text, contains('dividido em partes'));
+      r = m.handle('não'); // sem partes: usa os materiais da triagem
       expect(r.text, contains('Quanto de arroz'));
 
       r = m.handle('2 quilos');
@@ -167,22 +181,28 @@ void main() {
     });
 
     test('pular um material tira ele da tabela', () {
-      final m = atOffer()..handle('sim');
+      final m = atOffer()
+        ..handle('sim')
+        ..handle('não');
       final r = m.handle('pular'); // arroz
       expect(r.text, contains('Quanto de frango'));
     });
 
     test('unidade incompativel pede o tamanho certo', () {
-      final m = atOffer()..handle('sim');
+      final m = atOffer()
+        ..handle('sim')
+        ..handle('não');
       m.handle('2 quilos');
+      // usa em peso e paga "cada": pergunta quanto pesa a unidade comprada
       final r = m.handle('5 reais cada');
-      expect(r.understood, isFalse);
-      expect(r.text, contains('em peso'));
+      expect(r.text, contains('Quanto pesa 1 unidade de arroz'));
       expect(m.handle('5 quilos').text, contains('arroz: 2 reais por lote'));
     });
 
     test('voltar dentro da entrevista refaz a pergunta anterior', () {
-      final m = atOffer()..handle('sim');
+      final m = atOffer()
+        ..handle('sim')
+        ..handle('não');
       m.handle('2 quilos');
       final r = m.handle('voltar');
       expect(r.state, DialogState.costDetail);
@@ -190,7 +210,9 @@ void main() {
     });
 
     test('"o frete custa 20" na entrevista nao vira correcao do custo principal', () {
-      final m = atOffer()..handle('sim');
+      final m = atOffer()
+        ..handle('sim')
+        ..handle('não');
       m.handle('pular');
       m.handle('pular'); // tira arroz e frango
       m.handle('não'); // sem mais materiais
@@ -201,7 +223,9 @@ void main() {
     });
 
     test('entrevista em andamento e retomada depois que o app fecha', () {
-      final m = atOffer()..handle('sim');
+      final m = atOffer()
+        ..handle('sim')
+        ..handle('não');
       m.handle('2 quilos');
       final again = DialogMachine();
       expect(again.restore(m.toJson()), isTrue);

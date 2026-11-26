@@ -6,6 +6,7 @@ DialogMachine atQuantity() {
   final m = DialogMachine()..start();
   for (final t in [
     'Doces da Ana',
+    'marmitaria',
     'marmitas',
     'arroz e frango',
     'rende vinte',
@@ -54,6 +55,7 @@ void main() {
     test('bug relatado: corrigir a empresa NAO vira o nome do produto', () {
       final m = DialogMachine()..start();
       m.handle('doce da ana'); // STT entendeu errado
+      m.handle('marmitaria');
       expect(m.state, DialogState.askProduct);
 
       final r = m.handle('na verdade a empresa se chama Doces da Ana');
@@ -105,6 +107,7 @@ void main() {
     test('nao corrige o que ainda nao foi respondido', () {
       final m = DialogMachine()..start();
       m.handle('Doces da Ana');
+      m.handle('marmitaria');
       final r = m.handle('corrigir o custo');
       expect(r.state, DialogState.askProduct);
       expect(r.understood, isFalse);
@@ -117,6 +120,7 @@ void main() {
       m.start();
       m.handle('doce da ana');
       m.handle('na verdade a empresa se chama Doces da Ana');
+      m.handle('marmitaria');
       m.handle('marmitas');
       m.correct(DialogState.askProduct);
       m.handle('marmitex');
@@ -138,7 +142,7 @@ void main() {
       expect(m.state, DialogState.askCompany);
       m.handle('voltar');
       m.handle('Doces da Bia');
-      expect(m.state, DialogState.askProduct); // seguiu a ordem normal
+      expect(m.state, DialogState.askSector); // seguiu a ordem normal
     });
   });
 }

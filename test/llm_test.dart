@@ -33,7 +33,7 @@ class FakeLlm implements LlmEngine {
 
 /// Triagem deterministica (o LLM nao deve ser chamado aqui) ate a pergunta de quantidade.
 Future<void> triage(SmartDialog d) async {
-  for (final t in ['Doces da Ana', 'marmitas', 'arroz e frango', 'rende vinte', 'duas horas', 'pular']) {
+  for (final t in ['Doces da Ana', 'marmitaria', 'marmitas', 'arroz e frango', 'rende vinte', 'duas horas', 'pular']) {
     await d.handle(t);
   }
   expect(d.machine.state, DialogState.askQuantity);
