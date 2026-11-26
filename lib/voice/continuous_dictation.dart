@@ -25,7 +25,8 @@ abstract class RecognizerSession {
 class ContinuousDictation {
   ContinuousDictation(
     this._rec, {
-    this.silence = const Duration(seconds: 3),
+    // 4 s: pausa natural para pensar no meio da frase nao encerra a escuta.
+    this.silence = const Duration(seconds: 4),
     this.noSpeech = const Duration(seconds: 10),
     this.maxTotal = const Duration(seconds: 90),
     this.restartDelay = const Duration(milliseconds: 250),

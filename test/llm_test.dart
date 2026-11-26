@@ -12,6 +12,8 @@ class FakeLlm implements LlmEngine {
   final bool ready;
   final bool throws;
   final prompts = <String>[];
+  final intentPrompts = <String>[];
+  String intentReply = '{"intencao": "resposta"}';
 
   @override
   bool get isReady => ready;
@@ -22,6 +24,12 @@ class FakeLlm implements LlmEngine {
   @override
   Future<String> complete(String prompt,
       {Map<String, Object?>? jsonSchema, int maxTokens = 48}) async {
+    // Pergunta de intencao (mudar/comando): por padrao "resposta", sem gastar as
+    // respostas programadas, que sao da extracao de valor.
+    if (prompt.contains('intencao')) {
+      intentPrompts.add(prompt);
+      return intentReply;
+    }
     prompts.add(prompt);
     if (throws) throw StateError('falha simulada');
     return replies.removeAt(0);

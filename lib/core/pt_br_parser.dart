@@ -87,8 +87,8 @@ int? parseMoneyCents(String input) {
     return reais * 100 + int.parse(c);
   }
   // "<n> reais [e <m> [centavos]]" por extenso ou digitos
-  final parts = t.split(RegExp(r'\s*\breais?\b\s*'));
-  if (t.contains(RegExp(r'\breais?\b'))) {
+  final parts = t.split(RegExp(r'\s*\b(reais|real)\b\s*')); // "1 real e 50" tambem
+  if (t.contains(RegExp(r'\b(reais|real)\b'))) {
     final reais = parseInteger(parts.first) ?? 0;
     var cents = 0;
     if (parts.length > 1) {
@@ -100,6 +100,17 @@ int? parseMoneyCents(String input) {
   }
   if (t.contains(RegExp(r'\bcentavos?\b'))) {
     return parseInteger(t);
+  }
+  // Preco falado sem "reais": "um e cinquenta" = R$ 1,50, "cinco e noventa" = R$ 5,90.
+  // So quando a segunda parte e dezena redonda MAIOR que a primeira: "vinte e cinco"
+  // (25) e "cento e cinquenta" (150) continuam numeros.
+  final pair = RegExp(r'\b([a-z]+|\d+)\s+e\s+(dez|vinte|trinta|quarenta|cinquenta|sessenta|'
+          r'setenta|oitenta|noventa)\b')
+      .firstMatch(t);
+  if (pair != null) {
+    final a = parseInteger(pair[1]!);
+    final b = parseInteger(pair[2]!);
+    if (a != null && b != null && a < b && a < 100) return a * 100 + b;
   }
   final n = parseInteger(t);
   return n == null ? null : n * 100;
@@ -569,4 +580,30 @@ String speakDuration(int minutes) {
   ];
   if (parts.length <= 1) return parts.isEmpty ? '0 minutos' : parts.first;
   return '${parts.sublist(0, parts.length - 1).join(', ')} e ${parts.last}';
+}
+
+/// Fala de conversa, nao resposta ("eu acho que poderia ser...", "faltaram
+/// ingredientes da massa", "olha so", "espera"). Usada para nao aceitar esse texto como
+/// lista de ingredientes e para nao enviar sozinho o que o microfone captou.
+bool isConversation(String input) {
+  final n = normalizePt(input);
+  if (RegExp(r'\d').hasMatch(n)) return false;
+  return RegExp(r'\b(acho|achei|poderia|podia|olha|espera|calma|deixa|deixe|faltou|faltaram|'
+          r'faltando|esqueci|esqueceu|errou|errado|nao era|quer dizer|como assim|nao entendi|'
+          r'o que|por que|porque|sera|entao|tipo assim|sei la|hum|hmm|ne)\b')
+      .hasMatch(n);
+}
+
+/// A fala e uma PERGUNTA da pessoa (nao uma resposta)? "Voce tem registro dos precos?",
+/// "quanto paguei na farinha", "o que falta". O reconhecimento de voz nao poe "?", entao
+/// tambem vale comecar com palavra de pergunta.
+bool isQuestion(String input) {
+  final t = input.trim();
+  if (t.isEmpty) return false;
+  final n = normalizePt(t);
+  if (t.endsWith('?')) return true;
+  return RegExp(r'^(e\s+)?(voce|vc|tu)\s+(tem|sabe|lembra|guardou|consegue|pode|salvou|registrou)\b|'
+          r'^(e\s+)?(qual|quais|quanto|quantos|quantas|como|onde|cade|por que|porque|sera que|'
+          r'tem como|existe|o que|me diz|me fala)\b')
+      .hasMatch(n);
 }

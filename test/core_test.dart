@@ -84,6 +84,12 @@ void main() {
       expect(parseMoneyCents('cento e vinte reais'), 12000);
       expect(parseMoneyCents('doze reais e cinquenta'), 1250);
       expect(parseMoneyCents('cinquenta centavos'), 50);
+      expect(parseMoneyCents('1 real e 50 centavos'), 150);
+      expect(parseMoneyCents('um e cinquenta'), 150);
+      expect(parseMoneyCents('cinco e noventa'), 590);
+      expect(parseMoneyCents('vinte e cinco'), 2500); // numero, nao 20,05
+      expect(parseMoneyCents('cento e cinquenta'), 15000);
+      expect(parseMoneyCents('um real'), 100);
       expect(parseMoneyCents('120'), 12000);
       expect(parseMoneyCents('abc'), isNull);
       expect(parseMoneyCents('oitenta e sete e meio'), isNull);

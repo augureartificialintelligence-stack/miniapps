@@ -58,6 +58,132 @@ class UtteranceInterpreter {
     return b.toString();
   }
 
+  /// Campos que a pessoa pode pedir para mudar, como a IA deve nomea-los -> forma
+  /// canonica que o app entende ("corrigir a margem para 40").
+  static const _editFields = <String, String>{
+    'empresa': 'a empresa',
+    'ramo': 'o ramo',
+    'produto': 'o produto',
+    'ingredientes': 'os ingredientes',
+    'rendimento': 'o rendimento',
+    'tempo': 'o tempo',
+    'caracteristicas': 'as características',
+    'quantidade': 'a quantidade',
+    'custo': 'o custo',
+    'margem': 'a margem',
+    'embalagem': 'a embalagem',
+    'frete': 'o frete',
+    'gas': 'o gás',
+    'pro-labore': 'o pró-labore',
+    'outros custos': 'os outros custos',
+  };
+
+  static const _commands = {
+    'voltar': 'voltar',
+    'repetir': 'repetir',
+    'recomecar': 'recomeçar',
+    'detalhar custo': 'detalhar custo',
+    'ajuda': 'ajuda',
+  };
+
+  /// Fala inesperada no momento (o app nao entendeu): a IA diz se a pessoa quer MUDAR um
+  /// dado, dar um COMANDO, ou se e resposta da pergunta atual. Devolve a frase canonica
+  /// ("corrigir a margem para 40", "corrigir o preço da farinha", "voltar") ou null
+  /// (resposta da pergunta atual / nao entendeu). O app valida tudo como sempre.
+  Future<String?> interpretIntent(String utterance, String currentQuestion,
+      {List<String> ingredients = const []}) async {
+    if (!_llm.isReady || utterance.trim().isEmpty) return null;
+    final schema = _obj({
+      'intencao': {
+        'type': 'string',
+        'enum': ['mudar', 'comando', 'resposta', 'nada'],
+      },
+      'campo': _t(['string', 'null']),
+      'valor': _t(['string', 'null']),
+      'comando': _t(['string', 'null']),
+    });
+    final b = StringBuffer();
+    final profile = context?.profileSummary();
+    if (profile != null && profile.isNotEmpty) b.writeln('Cadastro: $profile');
+    b
+      ..writeln('Pergunta atual do app: "$currentQuestion"')
+      ..writeln('Campos que a pessoa pode mudar: ${_editFields.keys.join(', ')}'
+          '${ingredients.isEmpty ? '' : ', ou preço/quantidade de: ${ingredients.join(', ')}'}.')
+      ..writeln('Comandos: ${_commands.keys.join(', ')}.')
+      ..writeln('A pessoa disse algo que o app nao esperava. Se ela quer mudar ou corrigir um '
+          'dado, responda {"intencao":"mudar","campo":"<campo>","valor":"<valor novo ou null>"}. '
+          'Para preço ou quantidade de um ingrediente, use campo "preço de <ingrediente>" ou '
+          '"quantidade de <ingrediente>". Se e um comando, {"intencao":"comando",'
+          '"comando":"<comando>"}. Se e resposta da pergunta atual, {"intencao":"resposta"}. '
+          'Se nao der para entender, {"intencao":"nada"}. $_rules')
+      ..write('Fala: "${utterance.trim()}"');
+    try {
+      final j = _extractJson(await _llm.complete(b.toString(), jsonSchema: schema, maxTokens: 64));
+      if (j == null) return null;
+      return canonicalIntent(j, ingredients: ingredients);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Pergunta livre da pessoa ("qual a diferenca entre fermento quimico e biologico?"):
+  /// resposta curta da IA usando so os dados do app. null = sem IA ou nao soube.
+  Future<String?> answerQuestion(String question, String appData) async {
+    if (!_llm.isReady || question.trim().isEmpty) return null;
+    final schema = _obj({'resposta': _t(['string', 'null'])});
+    final prompt = 'Voce e o assistente de um app de precificacao para pequenos negocios. '
+        'Responda a pergunta da pessoa em portugues do Brasil, em no maximo duas frases '
+        'curtas e simples. Use os dados do app quando a pergunta for sobre eles. NUNCA '
+        'invente precos, quantidades ou valores que nao estejam nos dados. Se nao souber, '
+        'responda null.\n'
+        'Dados do app: ${appData.isEmpty ? '(nenhum ainda)' : appData}\n'
+        'Pergunta: "${question.trim()}"\n'
+        'Formato: {"resposta": "texto"}';
+    try {
+      final j = _extractJson(await _llm.complete(prompt, jsonSchema: schema, maxTokens: 96));
+      final v = j?['resposta'];
+      return v is String && v.trim().isNotEmpty && v != 'null' ? v.trim() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// JSON da IA -> frase que o app entende. Campo ou comando fora da lista = null.
+  static String? canonicalIntent(Map<String, Object?> j, {List<String> ingredients = const []}) {
+    final intent = j['intencao'];
+    String? str(Object? v) => v is String && v.trim().isNotEmpty && v != 'null' ? v.trim() : null;
+    String norm(String s) => s
+        .toLowerCase()
+        .replaceAll(RegExp('[áàâã]'), 'a')
+        .replaceAll(RegExp('[éê]'), 'e')
+        .replaceAll('í', 'i')
+        .replaceAll(RegExp('[óôõ]'), 'o')
+        .replaceAll('ú', 'u')
+        .replaceAll('ç', 'c');
+    if (intent == 'comando') {
+      final c = str(j['comando']);
+      return c == null ? null : _commands[norm(c)];
+    }
+    if (intent != 'mudar') return null;
+    final campo = str(j['campo']);
+    final valor = str(j['valor']);
+    if (campo == null) return null;
+    final f = norm(campo);
+    // Preco/quantidade de um ingrediente: "corrigir o preço da farinha para 6 reais o quilo".
+    final ing = RegExp(r'^(preco|valor|quantidade)\s+(de|da|do|das|dos)\s+(.+)$').firstMatch(f);
+    if (ing != null) {
+      final name = ing[3]!;
+      if (ingredients.isNotEmpty && !ingredients.any((i) => norm(i).contains(name) || name.contains(norm(i)))) {
+        return null;
+      }
+      final what = ing[1] == 'quantidade' ? 'a quantidade' : 'o preço';
+      return 'corrigir $what de $name${valor == null ? '' : ' para $valor'}';
+    }
+    final label = _editFields[f] ?? _editFields[f.replaceAll(' ', '-')];
+    if (label == null) return null;
+    return 'corrigir $label${valor == null ? '' : ' para $valor'}';
+  }
+
   static const _rules =
       'Responda SOMENTE com JSON. Se a fala nao trouxer a informacao, use null. '
       'Nao invente valores.';

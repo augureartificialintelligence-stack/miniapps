@@ -2,7 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import '../core/cost_breakdown.dart';
 import '../core/dialog_machine.dart';
+import '../core/document_parser.dart' show sameIngredient;
 import '../core/pricing_calculator.dart';
 import '../core/pt_br_parser.dart' show speakDuration;
 import '../llm/utterance_interpreter.dart';
@@ -90,6 +92,7 @@ class ConversationStore implements InterpreterContext {
             }
           }
           _activeId = j['activeId'] as String?;
+          _buildStamp = j['buildStamp'] as String?;
           // Versao 2 (um produto so): migra para a lista de produtos.
           final old = j['profile'];
           if (old is Map && _products.isEmpty) {
@@ -208,6 +211,25 @@ class ConversationStore implements InterpreterContext {
     await _persist();
   }
 
+  /// Carimbo da instalacao que gravou esta memoria (data/hora do build).
+  String? _buildStamp;
+
+  /// App reinstalado (build novo): comeca do zero. Limpa a tela (conversa em andamento,
+  /// produto ativo e empresa da conversa); os produtos salvos continuam em "Meus
+  /// produtos". Sem carimbo (build sem BUILD_STAMP) nao faz nada. true = zerou.
+  Future<bool> resetIfNewBuild(String stamp) async {
+    if (stamp.isEmpty || stamp == _buildStamp) return false;
+    final first = _buildStamp == null && _products.isEmpty && _dialog == null;
+    _buildStamp = stamp;
+    if (!first) {
+      _activeId = null;
+      company = null;
+      _clearConversationFields();
+    }
+    await _persist();
+    return !first;
+  }
+
   /// "Nova conversa": o produto atual fica salvo no historico e o proximo cadastro
   /// comeca do zero (mantendo a empresa).
   Future<void> startNewProduct() {
@@ -232,6 +254,8 @@ class ConversationStore implements InterpreterContext {
         batchYield: newer.batchYield ?? older.batchYield,
         productionMinutes: newer.productionMinutes ?? older.productionMinutes,
         characteristics: newer.characteristics ?? older.characteristics,
+        saleUnit: newer.saleUnit ?? older.saleUnit,
+        batchName: newer.batchName ?? older.batchName,
         costs: newer.costs ?? older.costs,
       );
 
@@ -269,6 +293,20 @@ class ConversationStore implements InterpreterContext {
       }
     }
     return best?.session;
+  }
+
+  /// Precos de ingredientes ja registrados (tabelas de custo de todos os produtos, o
+  /// mais recente primeiro; um por ingrediente).
+  List<KnownPrice> knownPrices() {
+    final out = <KnownPrice>[];
+    for (final p in products) {
+      for (final m in p.session.costs?.materials ?? const <MaterialCost>[]) {
+        if (m.priceCents == null || m.pack == null) continue;
+        if (out.any((k) => sameIngredient(k.name, m.name))) continue;
+        out.add(KnownPrice(m.name, m.priceCents!, m.pack!, from: p.name));
+      }
+    }
+    return out;
   }
 
   /// Nomes dos produtos salvos (para dizer quais existem).
@@ -379,6 +417,7 @@ class ConversationStore implements InterpreterContext {
           'version': 3,
           'company': company,
           'activeId': _activeId,
+          'buildStamp': _buildStamp,
           'products': [for (final p in _products) p.toJson()],
           'conversation': _dialog == null
               ? null

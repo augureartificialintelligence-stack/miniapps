@@ -18,9 +18,17 @@ Future<void> main() async {
 }
 
 /// Memoria local no armazenamento privado do app. Falha = app sem memoria, nunca travado.
+/// Carimbo do build (data/hora), passado em lutter build --dart-define=BUILD_STAMP=....
+/// A cada instalacao nova o app comeca do zero (ver [ConversationStore.resetIfNewBuild]).
+const _buildStamp = String.fromEnvironment('BUILD_STAMP');
+
 Future<ConversationStore?> _openStore() async {
   try {
-    return await ConversationStore.open(await getApplicationDocumentsDirectory());
+    final store = await ConversationStore.open(await getApplicationDocumentsDirectory());
+    if (await store.resetIfNewBuild(_buildStamp)) {
+      debugPrint('[AUGURE][MEM] app reinstalado ($_buildStamp): comecando do zero');
+    }
+    return store;
   } catch (e) {
     debugPrint('[AUGURE][MEM] memoria indisponivel: $e');
     return null;
@@ -56,6 +64,8 @@ class _AugureMiniAppState extends State<AugureMiniApp> {
           : (request, {current, exact = false}) =>
               store.findSavedProduct(request, current: current, exact: exact),
       savedProductNames: store == null ? null : () => store.savedProductNames,
+      // Precos ja registrados (outros produtos): "voce tem registro dos precos?".
+      knownPrices: store?.knownPrices,
     );
     machine.onCorrected = (field, oldValue, newValue) {
       debugPrint('[AUGURE][DLG] correcao ${field.name}: "$oldValue" -> "$newValue"');

@@ -126,6 +126,41 @@ final _spokenPart = RegExp(
     r'\b(?:para\s+(?:a|o|as|os)|na|no|da|do)\s+(massa|recheio|cobertura|calda|creme|base|'
     r'ganache|decoracao|montagem|molho|farofa|topping)s?\b|\b(massa|recheio|cobertura|calda)\s*:');
 
+/// Palavras que COMECAM um ingrediente (sem acento, singular e plural). Complementos
+/// ("de soja", "refinado", "integral", "em po") ficam com o ingrediente anterior.
+const _headWords = {
+  'cenoura', 'ovo', 'gema', 'clara', 'oleo', 'azeite', 'acucar', 'farinha', 'fermento',
+  'sal', 'chocolate', 'achocolatado', 'manteiga', 'margarina', 'leite', 'creme', 'iogurte',
+  'requeijao', 'queijo', 'mussarela', 'presunto', 'frango', 'carne', 'arroz', 'feijao',
+  'batata', 'cebola', 'alho', 'tomate', 'milho', 'ervilha', 'aveia', 'coco', 'mel', 'canela',
+  'cravo', 'baunilha', 'essencia', 'gelatina', 'morango', 'banana', 'maca', 'limao',
+  'laranja', 'uva', 'nozes', 'castanha', 'amendoim', 'granulado', 'polvilho', 'fuba',
+  'maisena', 'amido', 'agua', 'bicarbonato', 'oregano', 'pimenta', 'azeitona', 'palmito',
+  'linguica', 'bacon', 'calabresa', 'catupiry', 'goiabada', 'doce', 'cafe', 'cha', 'gengibre',
+  'abacaxi', 'maracuja', 'massa', 'macarrao', 'pao', 'biscoito', 'bolacha', 'chantilly',
+  'glicerina', 'corante', 'cera', 'pavio', 'tecido', 'linha', 'cola', 'fita', 'papel',
+};
+
+/// "cenoura ovos oleo de soja acucar refinado" -> [cenoura, ovos, oleo de soja, acucar
+/// refinado]. Palavra principal depois de "de/da/do" nao abre item ("creme de leite").
+List<String> _splitByHeadWords(String text) {
+  final words = text.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+  final out = <List<String>>[];
+  for (var i = 0; i < words.length; i++) {
+    var n = normalizePt(words[i]).replaceAll(RegExp(r'[^a-z]'), '');
+    if (n.endsWith('s') && n.length > 3 && !_headWords.contains(n)) n = n.substring(0, n.length - 1);
+    if (n.endsWith('oe') || n.endsWith('ae')) n = '${n.substring(0, n.length - 2)}ao'; // limoes
+    final prev = i == 0 ? '' : normalizePt(words[i - 1]);
+    final isHead = _headWords.contains(n) && !RegExp(r'^(de|da|do|das|dos|com|sem)$').hasMatch(prev);
+    if (out.isEmpty || isHead) {
+      out.add([words[i]]);
+    } else {
+      out.last.add(words[i]);
+    }
+  }
+  return [for (final w in out) w.join(' ')];
+}
+
 /// Ingredientes DITADOS ou digitados numa frase so, sem quebra de linha:
 /// "tres cenouras tres ovos uma xicara de oleo ... para a massa. para a cobertura e
 /// chocolate em po 1/2 xicara, meia xicara de acucar e uma colher de manteiga".
@@ -135,7 +170,11 @@ final _spokenPart = RegExp(
 /// Sem nenhuma quantidade, cai na lista simples ("arroz, feijao e frango").
 List<RecipeItem> parseSpokenRecipe(String? text) {
   if (text == null || text.trim().isEmpty) return const [];
-  final t = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+  final t = text
+      // "300g" -> "300 g" (a medida colada no numero tambem conta como medida)
+      .replaceAllMapped(RegExp(r'(\d)([a-zA-Z])'), (m) => '${m[1]} ${m[2]}')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
   final n = normalizePt(t); // mesmo tamanho de t: indices valem para os dois
 
   // 1) Trechos por parte do produto.
@@ -161,9 +200,14 @@ List<RecipeItem> parseSpokenRecipe(String? text) {
   }
   chunks.add((t.substring(pos), pending));
 
-  // 2) Itens dentro de cada trecho.
+  // 2) Itens dentro de cada trecho. Virgula e ponto e virgula separam itens (menos em
+  // decimais como "1,5 kg"): "farinha de trigo, fermento em po 1 colher de sopa".
   final items = <RecipeItem>[];
-  for (final (chunk, part) in chunks) {
+  final segments = <(String, String?)>[
+    for (final (chunk, part) in chunks)
+      for (final s in chunk.split(RegExp(r';|,(?!\d)'))) (s, part),
+  ];
+  for (final (chunk, part) in segments) {
     final c = chunk
         .replaceFirst(RegExp(r'^[\s.,;:]*((e|é|sao|são|vai|leva)\s+)?', caseSensitive: false), '')
         .replaceAllMapped(RegExp(r'(\d+)\s+a\s+(\d+)'),
@@ -173,7 +217,15 @@ List<RecipeItem> parseSpokenRecipe(String? text) {
     final cn = normalizePt(c);
     final starts = [for (final m in _itemStart.allMatches(cn)) m.start];
     if (starts.isEmpty) {
-      for (final name in splitMaterials(c.replaceAll(RegExp(r'[.;:]+$'), ''))) {
+      final clean = c.replaceAll(RegExp(r'[.;:]+$'), '');
+      var names = splitMaterials(clean);
+      // Nomes em sequencia, sem virgula nem "e" ("cenoura ovos oleo de soja acucar..."):
+      // separa pela palavra principal de cada ingrediente.
+      if (names.length == 1) {
+        final byHead = _splitByHeadWords(clean);
+        if (byHead.length > 1) names = byHead;
+      }
+      for (final name in names) {
         items.add(RecipeItem(name, null, part: part));
       }
       continue;
@@ -194,11 +246,21 @@ List<RecipeItem> parseSpokenRecipe(String? text) {
         items.add(item);
         continue;
       }
-      // So medida, sem nome ("chocolate em po 50% cacau 1/2 xicara"): e do item anterior.
+      // So medida, sem nome: e do item anterior. "chocolate em po 1/2 xicara" (sem medida)
+      // ou "3 cenouras ... total 300 g" (peso total vale mais que a contagem).
       final m = parseMeasure(piece);
-      if (m != null && items.isNotEmpty && items.last.used == null) {
-        final prev = items.removeLast();
-        items.add(RecipeItem(prev.name, m, part: prev.part));
+      if (m != null && items.isNotEmpty) {
+        final prev = items.last;
+        final better = prev.used == null ||
+            (prev.used!.kind == MeasureKind.unit && m.kind != MeasureKind.unit);
+        if (better) {
+          items.removeLast();
+          final name = prev.name
+              .replaceAll(RegExp(r'\s+(no\s+total|ao\s+todo|total|aproximadamente|cerca\s+de)$',
+                  caseSensitive: false), '')
+              .trim();
+          items.add(RecipeItem(name, m, part: prev.part));
+        }
       }
     }
   }

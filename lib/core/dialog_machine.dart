@@ -2,6 +2,7 @@ import 'cost_breakdown.dart';
 import 'document_parser.dart';
 import 'pricing_calculator.dart';
 import 'pt_br_parser.dart';
+import 'sale_unit.dart';
 import 'sectors.dart';
 
 /// Estados do fluxo "assistente de vendas / precificacao".
@@ -73,6 +74,8 @@ class SalesSession {
     this.batchYield,
     this.productionMinutes,
     this.characteristics,
+    this.saleUnit,
+    this.batchName,
     this.quantity,
     this.totalCostCents,
     this.marginPercent,
@@ -89,6 +92,15 @@ class SalesSession {
   final int? batchYield;
   final int? productionMinutes;
   final String? characteristics;
+
+  /// Unidade de venda ("pedaço", "fatia", "pote"); null = unidade.
+  final String? saleUnit;
+
+  /// O que e o lote ("bolo", "torta", "forma"); null = lote.
+  final String? batchName;
+
+  /// Palavras da unidade de venda para as frases ("12 pedaços", "o bolo inteiro").
+  UnitWords get units => unitWordsFor(saleUnit, batchName);
 
   // Preco.
   final int? quantity;
@@ -112,6 +124,8 @@ class SalesSession {
     int? batchYield,
     int? productionMinutes,
     String? characteristics,
+    String? saleUnit,
+    String? batchName,
     int? quantity,
     int? totalCostCents,
     int? marginPercent,
@@ -124,6 +138,8 @@ class SalesSession {
         batchYield: batchYield ?? this.batchYield,
         productionMinutes: productionMinutes ?? this.productionMinutes,
         characteristics: characteristics ?? this.characteristics,
+        saleUnit: saleUnit ?? this.saleUnit,
+        batchName: batchName ?? this.batchName,
         quantity: quantity ?? this.quantity,
         totalCostCents: totalCostCents ?? this.totalCostCents,
         marginPercent: marginPercent ?? this.marginPercent,
@@ -141,6 +157,8 @@ class SalesSession {
             field == DialogState.askProductionTime ? value as int? : productionMinutes,
         characteristics:
             field == DialogState.askCharacteristics ? value as String? : characteristics,
+        saleUnit: saleUnit,
+        batchName: batchName,
         quantity: field == DialogState.askQuantity ? value as int? : quantity,
         totalCostCents: field == DialogState.askCost ? value as int? : totalCostCents,
         marginPercent: field == DialogState.askMargin ? value as int? : marginPercent,
@@ -155,6 +173,8 @@ class SalesSession {
         batchYield: table?.batchYield ?? batchYield,
         productionMinutes: productionMinutes,
         characteristics: characteristics,
+        saleUnit: saleUnit,
+        batchName: batchName,
         quantity: quantity,
         totalCostCents: totalCostCents,
         marginPercent: marginPercent,
@@ -173,6 +193,8 @@ class SalesSession {
         batchYield: batchYield,
         productionMinutes: productionMinutes,
         characteristics: characteristics,
+        saleUnit: saleUnit,
+        batchName: batchName,
         costs: costs,
       );
 
@@ -184,6 +206,8 @@ class SalesSession {
         'batchYield': batchYield,
         'productionMinutes': productionMinutes,
         'characteristics': characteristics,
+        'saleUnit': saleUnit,
+        'batchName': batchName,
         'quantity': quantity,
         'totalCostCents': totalCostCents,
         'marginPercent': marginPercent,
@@ -198,6 +222,8 @@ class SalesSession {
         batchYield: (j['batchYield'] as num?)?.toInt(),
         productionMinutes: (j['productionMinutes'] as num?)?.toInt(),
         characteristics: j['characteristics'] as String?,
+        saleUnit: j['saleUnit'] as String?,
+        batchName: j['batchName'] as String?,
         quantity: (j['quantity'] as num?)?.toInt(),
         totalCostCents: (j['totalCostCents'] as num?)?.toInt(),
         marginPercent: (j['marginPercent'] as num?)?.toInt(),
@@ -207,7 +233,7 @@ class SalesSession {
 
 class DialogResponse {
   const DialogResponse(this.text, this.state,
-      {this.result, this.breakdown, this.understood = true});
+      {this.result, this.breakdown, this.understood = true, this.share = false});
 
   /// Texto exibido E falado.
   final String text;
@@ -218,6 +244,9 @@ class DialogResponse {
 
   /// Preenchido ao terminar o custo detalhado (tabela para a tela).
   final CostBreakdown? breakdown;
+
+  /// A pessoa pediu para compartilhar/exportar o resultado (a tela abre as opcoes).
+  final bool share;
 
   /// false quando a fala nao pode ser interpretada no estado atual (pedido de repeticao).
   /// A camada de LLM local usa isso para tentar uma segunda interpretacao.
@@ -362,7 +391,12 @@ CorrectionRequest? parseCorrection(String input) {
 /// e feita uma vez e vira o cadastro ([profile]); nas proximas conversas o app vai direto
 /// ao preco desse produto, e o cadastro so muda por correcao ("corrigir o tempo").
 class DialogMachine {
-  DialogMachine({SalesSession? profile, this.recallProduct, this.savedProductNames}) {
+  DialogMachine({
+    SalesSession? profile,
+    this.recallProduct,
+    this.savedProductNames,
+    this.knownPrices,
+  }) {
     _state = DialogState.askCompany;
     if (profile != null) this.profile = profile.keepTriage();
   }
@@ -377,6 +411,12 @@ class DialogMachine {
 
   /// Nomes dos produtos salvos (para dizer quais existem quando nao acha).
   final List<String> Function()? savedProductNames;
+
+  /// Precos de ingredientes ja registrados (memoria local).
+  final List<KnownPrice> Function()? knownPrices;
+
+  /// Precos salvos oferecidos ("quer que eu use esses precos?"), aguardando sim/nao.
+  List<KnownPrice>? _pendingFill;
 
   /// Produto salvo aguardando "sim/nao" em [DialogState.askReuse].
   SalesSession? _recalled;
@@ -405,6 +445,9 @@ class DialogMachine {
   SalesSession get session => _session;
   String get lastPrompt => _lastPrompt;
 
+  /// Pergunta atual, sem o comentario da resposta anterior (para voltar a ela).
+  String get currentQuestion => _resumeText();
+
   static const _greeting =
       'Oi! Eu sou seu assistente de vendas. Vou te ajudar a descobrir quanto cobrar. ';
 
@@ -427,8 +470,10 @@ class DialogMachine {
     if (unitCost == null) return null;
     final y = _session.costs?.batchYield ?? _session.batchYield;
     // Preco do lote ("o lote por 80 reais") vira preco da unidade.
-    final isLot = RegExp(r'\b(lote|fornada|tudo)\b').hasMatch(n) &&
-        !RegExp(r'\b(unidade|cada)\b').hasMatch(n);
+    final u = _session.units;
+    final batchWord = u.batch == null ? '' : '|${normalizePt(u.batch!)}';
+    final isLot = RegExp('\\b(lote|fornada|tudo|inteir[ao]$batchWord)\\b').hasMatch(n) &&
+        !RegExp('\\b(unidade|cada|${normalizePt(u.one)})\\b').hasMatch(n);
     final unitPrice = isLot && y != null && y > 0 ? (cents / y).round() : cents;
     _simulation = PriceSimulation(
       priceCents: unitPrice,
@@ -437,13 +482,226 @@ class DialogMachine {
       batchYield: y,
     );
     final lotNote =
-        isLot && y != null ? 'O lote de $y por ${speakBrl(cents)} dá a unidade a ${speakBrl(unitPrice)}. ' : '';
+        isLot && y != null
+            ? 'O ${u.batchName} de ${u.count(y)} por ${speakBrl(cents)} dá ${u.theOne} a '
+                '${speakBrl(unitPrice)}. '
+            : '';
     final next = _state == DialogState.offerDetail
         ? ' Pode testar outro preço. $_offerText'
         : ' Pode testar outro preço, ou diga: recomeçar.';
-    final text = '$lotNote${speakSimulation(_simulation!)}$next';
+    final text = '$lotNote${speakSimulation(_simulation!, units: _session.units)}$next';
     _lastPrompt = text;
     return DialogResponse(text, _state);
+  }
+
+  /// Unidade de venda e rendimento ditos em qualquer ponto ("sao 12 pedacos de 1 bolo",
+  /// "cada bolo rende 12 fatias", "vendo por pote"). Atualiza as frases do app e o
+  /// rendimento. Na pergunta da quantidade/rendimento a fala tambem e a resposta.
+  /// null = a fala nao traz unidade de venda (segue o fluxo normal).
+  DialogResponse? _trySaleUnit(String input) {
+    // Na pergunta do produto, "marmitas" e o nome do produto; na entrevista de custo,
+    // "o pote custa 2 reais" e embalagem.
+    if (_state == DialogState.costDetail || _state == DialogState.askProduct) return null;
+    final su = parseSaleUnit(input);
+    if (su == null) return null;
+    const answerStates = {DialogState.askQuantity, DialogState.askBatchYield};
+    const reviewStates = {DialogState.confirm, DialogState.result, DialogState.offerDetail};
+    if (!su.strong && !answerStates.contains(_state) && !reviewStates.contains(_state)) {
+      return null;
+    }
+    final unitChanged = su.one != _session.saleUnit ||
+        (su.batch != null && su.batch != _session.batchName);
+    final oldYield = _session.batchYield;
+    _session = _session.copyWith(saleUnit: su.one, batchName: su.batch);
+    final u = _session.units;
+    final notes = <String>[
+      if (unitChanged) 'você vende por ${su.one}',
+    ];
+    if (su.perBatch != null && su.perBatch != oldYield) {
+      if (oldYield != null) {
+        onCorrected?.call(DialogState.askBatchYield, oldYield, su.perBatch);
+      }
+      _setField(DialogState.askBatchYield, su.perBatch);
+      notes.add('${su.batchFeminine ? 'uma' : 'um'} ${u.batchName} rende ${u.count(su.perBatch!)}');
+    }
+    if (_session.hasProfile) profile = _session.keepTriage();
+    final ack = notes.isEmpty ? '' : 'Anotei: ${notes.join(', e ')}.';
+
+    // Nas perguntas de quantidade/rendimento, a mesma fala responde a pergunta.
+    if (answerStates.contains(_state)) {
+      final r = _answer(input);
+      if (r.understood) {
+        return DialogResponse(ack.isEmpty ? r.text : '$ack ${r.text}', r.state,
+            result: r.result, breakdown: r.breakdown);
+      }
+      if (ack.isEmpty) return null;
+      return _say('$ack ${_question(_state)}');
+    }
+    if (ack.isEmpty) return null;
+    // Na revisao do calculo: confere de novo com as palavras certas.
+    if (reviewStates.contains(_state) && _session.quantity != null &&
+        _session.totalCostCents != null && _session.marginPercent != null) {
+      _simulation = null;
+      return _goto(DialogState.confirm, '$ack ${_confirmationText()}');
+    }
+    return _say('$ack ${_question(_state)}');
+  }
+
+  // ---- perguntas da pessoa ----
+
+  /// Perguntas que o app responde sozinho. Pergunta desconhecida volta como "nao
+  /// entendi" (a IA local responde em seguida, se estiver instalada).
+  DialogResponse? _tryQuestion(String input) {
+    if (!isQuestion(input) || parseYesNo(input) != null || RegExp(r'\d').hasMatch(input)) {
+      return null;
+    }
+    final n = normalizePt(input);
+    final back = _resumeText();
+    final table = costTable;
+
+    // Precos registrados ("voce tem registro dos precos dos produtos listados?").
+    final asksPrice = RegExp(r'\b(precos?|valor|valores|custa|custou|paguei|pago)\b').hasMatch(n);
+    final known = knownPrices?.call() ?? const <KnownPrice>[];
+    if (asksPrice && RegExp(r'\b(registro|registrado|historico|salvos?|guardados?|anotados?|'
+            r'lembra|tem|sabe|ja|listados?|desses|destes|deles)\b')
+        .hasMatch(n)) {
+      // Pergunta de UM ingrediente ("quanto paguei na farinha?").
+      final one = _knownFor(n, known);
+      if (one != null) return _retryOk('Tenho registrado: ${one.speak()}. $back');
+      if (known.isEmpty) {
+        return _retryOk('Ainda não tenho preços salvos. Eles ficam guardados quando você '
+            'detalha o custo de um produto. $back');
+      }
+      final missing = table?.materials.where((m) => m.costCents == null).toList() ?? const [];
+      final useful = {
+        for (final m in missing)
+          for (final k in known)
+            if (sameIngredient(m.name, k.name)) k,
+      }.toList();
+      if (useful.isNotEmpty) {
+        _pendingFill = useful;
+        return _retryOk('Tenho preços salvos de: ${useful.map((k) => k.speak()).join('; ')}. '
+            'Quer que eu use esses preços na tabela?');
+      }
+      return _retryOk('Tenho preços salvos de: ${known.take(6).map((k) => k.speak()).join('; ')}. '
+          'Nenhum deles é dos ingredientes que faltam agora. $back');
+    }
+    // Preco de um ingrediente ("quanto custa a farinha?", "qual o preco do acucar?").
+    if (asksPrice) {
+      final inTable = table?.materials
+          .where((m) => m.priceCents != null && m.pack != null)
+          .where((m) => _nameIn(n, m.name))
+          .firstOrNull;
+      if (inTable != null) {
+        return _retryOk('Na tabela: ${inTable.name}, ${speakBrl(inTable.priceCents!)} por '
+            '${speakMeasure(inTable.pack!)}${inTable.costCents == null ? '' : ', ${speakBrl(inTable.costCents!)} por ${_session.units.batchName}'}. $back');
+      }
+      final one = _knownFor(n, known);
+      if (one != null) return _retryOk('Tenho registrado: ${one.speak()}. $back');
+    }
+    // O que falta preencher.
+    if (RegExp(r'\b(falta|faltam|faltando|pendente|pendentes)\b').hasMatch(n)) {
+      final missing = table?.materials.where((m) => m.costCents == null).toList() ?? const [];
+      if (missing.isEmpty) return _retryOk('Não falta nenhum ingrediente na tabela. $back');
+      return _retryOk('Falta completar: ${missing.map((m) => '${m.name} (${m.used == null ? 'quantidade' : 'preço'})').join(', ')}. $back');
+    }
+    // Preco sugerido.
+    if (RegExp(r'\b(cobrar|cobro|vender|preco sugerido|preco de venda)\b').hasMatch(n)) {
+      final sug = _suggestedUnitPrice();
+      if (sug != null) {
+        return _retryOk('O preço sugerido ${_session.units.ofTheOne} é ${speakBrl(sug)}. $back');
+      }
+      return _retryOk('Ainda não calculei o preço: preciso da quantidade, do custo e da '
+          'margem. $back');
+    }
+    // Produtos salvos.
+    if (RegExp(r'\b(produtos|cadastrados?|salvos?)\b').hasMatch(n) && savedProductNames != null) {
+      final names = savedProductNames!();
+      return _retryOk(names.isEmpty
+          ? 'Ainda não tenho produtos salvos. $back'
+          : 'Produtos salvos: ${names.join(', ')}. Eles ficam em Meus produtos, no topo. $back');
+    }
+    // Como funciona.
+    if (RegExp(r'\b(funciona|faz|fazer|posso dizer|posso falar|ajuda)\b').hasMatch(n)) {
+      return _retryOk('Eu calculo o preço do seu produto: pergunto os ingredientes, o custo e '
+          'a margem, e mostro o preço da unidade e do lote. Você pode corrigir qualquer dado '
+          'dizendo, por exemplo: corrigir a margem. $back');
+    }
+    // Pergunta que o app nao sabe responder: nao vira resposta (a IA local tenta).
+    return _retry('Não sei responder isso ainda. $back');
+  }
+
+  /// Resposta a uma pergunta da pessoa: NAO muda a pergunta atual do app.
+  DialogResponse _retryOk(String text) => DialogResponse(text, _state);
+
+  /// Texto para voltar a pergunta atual depois de responder outra coisa.
+  String _resumeText() {
+    if (_state == DialogState.result) return '';
+    final q = _question(_state);
+    return q.isEmpty ? '' : 'Voltando: $q';
+  }
+
+  static bool _nameIn(String n, String name) {
+    final head = normalizePt(name).split(RegExp(r'[^a-z]+')).firstWhere((w) => w.length > 2,
+        orElse: () => '');
+    if (head.isEmpty) return false;
+    final stem = head.endsWith('s') ? head.substring(0, head.length - 1) : head;
+    return RegExp('\\b${stem}s?\\b').hasMatch(n);
+  }
+
+  KnownPrice? _knownFor(String n, List<KnownPrice> known) {
+    for (final k in known) {
+      if (_nameIn(n, k.name)) return k;
+    }
+    return null;
+  }
+
+  /// Usa os precos salvos nos ingredientes da tabela que ainda nao tem preco.
+  DialogResponse _applyKnownPrices(List<KnownPrice> prices) {
+    final items = [for (final k in prices) PurchaseItem(k.name, k.cents, k.pack)];
+    if (_state == DialogState.costDetail && _interview != null) {
+      final before = _interview!.table.materials.where((m) => m.costCents != null).length;
+      // So preenche quem nao tem preco (nao cria itens novos).
+      final missing = _interview!.table.materials.where((m) => m.priceCents == null).toList();
+      final matched = [
+        for (final it in items)
+          if (missing.any((m) => sameIngredient(m.name, it.name))) it,
+      ];
+      final q = _interview!.importDocuments(const [], matched);
+      final added = _interview!.table.materials.where((m) => m.costCents != null).length - before;
+      return _say('Pronto, usei $added ${added == 1 ? 'preço salvo' : 'preços salvos'}. $q');
+    }
+    final t = _session.costs;
+    if (t != null) {
+      final copy = CostBreakdown.fromJson(t.toJson())!;
+      for (final it in items) {
+        for (final m in copy.materials) {
+          if (m.priceCents == null && sameIngredient(m.name, it.name)) {
+            m
+              ..priceCents = it.cents
+              ..pack = it.pack;
+          }
+        }
+      }
+      _session = _session.withCosts(copy);
+      if (_session.hasProfile) profile = _session.keepTriage();
+    }
+    return _say('Pronto, anotei os preços salvos na tabela. ${_question(_state)}');
+  }
+
+  /// Contexto para a IA local responder perguntas livres (so dados, sem inventar).
+  String contextForQuestions() {
+    final s = _session;
+    final t = costTable;
+    final known = knownPrices?.call() ?? const <KnownPrice>[];
+    return [
+      if (s.product != null) 'Produto: ${s.product}.',
+      if (s.batchYield != null) 'Rende ${s.units.count(s.batchYield!)} por ${s.units.batchName}.',
+      if (t != null && t.materials.isNotEmpty)
+        'Ingredientes: ${t.materials.map((m) => '${m.name}${m.used == null ? '' : ' ${speakMeasure(m.used!)}'}${m.costCents == null ? ' (sem preço)' : ' custa ${formatBrl(m.costCents!)}'}').join('; ')}.',
+      if (known.isNotEmpty) 'Preços registrados: ${known.take(10).map((k) => k.speak()).join('; ')}.',
+      if (_suggestedUnitPrice() != null) 'Preço sugerido: ${formatBrl(_suggestedUnitPrice()!)}.',
+    ].join(' ');
   }
 
   /// Custo de producao de UMA unidade: da tabela de custo completa, se houver; senao,
@@ -501,11 +759,39 @@ class DialogMachine {
   }
 
   DialogResponse handle(String input) {
+    // Resposta para a oferta de usar precos salvos.
+    final fill = _pendingFill;
+    if (fill != null) {
+      _pendingFill = null;
+      final yn = parseYesNo(input);
+      if (yn == YesNo.yes) return _applyKnownPrices(fill);
+      if (yn == YesNo.no) return _say('Tudo bem. ${_question(_state)}');
+    }
+
     final cmd = parseCommand(input);
     if (cmd != null) return _command(cmd);
 
+    // Pergunta da pessoa ("voce tem registro dos precos?"): responde e volta para a
+    // pergunta atual. Pergunta nunca vira resposta da pergunta do app.
+    final q = _tryQuestion(input);
+    if (q != null) return q;
+
     // Na entrevista de custo, frases como "o frete custa 20" nao sao correcoes.
-    if (_state == DialogState.costDetail) return _answer(input);
+    if (_state == DialogState.costDetail) {
+      // Correcao de dado da FICHA no meio do custo ("corrigir os ingredientes", "o produto
+      // e X"). Rendimento, precos e custos extras sao corrigidos pela propria entrevista.
+      final fix = parseCorrection(input);
+      const triage = {
+        DialogState.askCompany, DialogState.askSector, DialogState.askProduct,
+        DialogState.askMaterials, DialogState.askProductionTime,
+      };
+      if (fix != null && triage.contains(fix.field)) return _correct(fix.field, fix.value);
+      return _answer(input);
+    }
+
+    // "sao 12 pedacos de 1 bolo", "vendo por fatia": unidade de venda (e rendimento).
+    final unit = _trySaleUnit(input);
+    if (unit != null) return unit;
 
     // "use a receita do bolo de cenoura que voce ja tem": reaproveita um produto salvo.
     final reuse = _tryReuseRequest(input);
@@ -597,6 +883,49 @@ class DialogMachine {
     return _say('$ack ${_question(_state)}');
   }
 
+  /// A fala parece resposta da pergunta atual? Usada pelo envio automatico do texto
+  /// ouvido: ruido ("reproduzir"), frase cortada ("entao olha so, primeira") ou conversa
+  /// ("eu acho que poderia...") ficam esperando a pessoa confirmar ou continuar falando.
+  bool looksLikeAnswer(String input) {
+    final t = input.trim();
+    if (t.isEmpty) return false;
+    // Pergunta da pessoa e intencional: envia (o app responde e volta a pergunta atual).
+    if (isQuestion(t)) return true;
+    if (parseCommand(t) != null ||
+        parseCorrection(t) != null ||
+        parseFieldStatements(t).isNotEmpty ||
+        parseSaleUnit(t)?.strong == true) {
+      return true;
+    }
+    if (_state == DialogState.costDetail) return _interview?.looksLikeAnswer(t) ?? true;
+    if (isConversation(t)) return false;
+    final yesNo = parseYesNo(t) != null || isSkip(t);
+    switch (_state) {
+      case DialogState.askQuantity:
+        return _parseQuantity(t) != null;
+      case DialogState.askBatchYield:
+        return isSkip(t) || parseBatchYield(t) != null;
+      case DialogState.askProductionTime:
+        return isSkip(t) || parseDurationMinutes(t) != null;
+      case DialogState.askCost:
+        return parseMoneyCents(t) != null;
+      case DialogState.askMargin:
+        return parsePercent(t) != null;
+      case DialogState.confirm:
+      case DialogState.askReuse:
+        return yesNo;
+      case DialogState.offerDetail:
+      case DialogState.result:
+        // sim/nao, "detalhar custo" ou um preco para simular
+        return yesNo ||
+            RegExp(r'\b(detalhar|detalhe|tabela)\b').hasMatch(normalizePt(t)) ||
+            _shareWords.hasMatch(normalizePt(t)) ||
+            parseMoneyCents(t) != null;
+      default:
+        return true; // texto livre (empresa, ramo, produto, ingredientes...)
+    }
+  }
+
   /// Volta para uma resposta anterior (lapis na tela ou "corrigir <campo>").
   /// Depois de responder, a conversa continua de onde estava.
   DialogResponse correct(DialogState field) => _correct(field, null);
@@ -608,6 +937,12 @@ class DialogMachine {
     if (_state == DialogState.result &&
         RegExp(r'\b(detalhar|detalhe|tabela)\b').hasMatch(normalizePt(input))) {
       return _startInterview();
+    }
+    // "compartilhar", "exportar", "manda o resultado no zap": abre as opcoes de envio.
+    if ((_state == DialogState.result || _state == DialogState.offerDetail) &&
+        _shareWords.hasMatch(normalizePt(input))) {
+      const text = 'Certo. Escolha como enviar: o resumo por mensagem ou a planilha.';
+      return DialogResponse(text, _state, share: true);
     }
     switch (_state) {
       case DialogState.askReuse:
@@ -631,12 +966,18 @@ class DialogMachine {
           return _goto(DialogState.askQuantity,
               'Tudo bem, vamos corrigir os números. ${_question(DialogState.askQuantity)}');
         }
-        return _retry('Responda sim para continuar ou não para corrigir.');
+        return _retry('Diga sim para calcular, ou não para refazer os números. Também pode '
+            'dizer o que mudar, por exemplo: a margem é 40 por cento.');
 
       case DialogState.result:
-        return _say('Para calcular de novo com outros números, diga: recomeçar. Para '
-            'detalhar o custo de produção, diga: detalhar custo. Para mudar uma resposta, '
-            'diga, por exemplo: corrigir o custo.');
+        if (RegExp(r'\b(salvar|salva|salve|guardar|guarda|gravar|grava)\b')
+            .hasMatch(normalizePt(input))) {
+          return _say('Pode deixar: tudo já fica salvo automaticamente, a ficha, a tabela de '
+              'custo e o último preço. Você encontra o produto em Meus produtos, no topo.');
+        }
+        return _say('Para enviar o resultado, diga: compartilhar. Para calcular de novo com '
+            'outros números, diga: recomeçar. Para detalhar o custo de produção, diga: '
+            'detalhar custo. Para mudar uma resposta, diga, por exemplo: corrigir o custo.');
 
       case DialogState.offerDetail:
         final yn = parseYesNo(input);
@@ -684,7 +1025,8 @@ class DialogMachine {
             ? const _Parsed.error('Não entendi o nome. Qual produto você quer vender?')
             : _Parsed(v);
       case DialogState.askMaterials:
-        final v = skip ? null : parseMaterials(input);
+        // Conversa ("eu acho que...", "faltaram ingredientes") nao e lista de ingredientes.
+        final v = skip || isConversation(input) ? null : parseMaterials(input);
         return v == null && !skip
             ? const _Parsed.error(
                 'Não entendi. Fale os ingredientes ou materiais, ou diga: pular.')
@@ -746,7 +1088,9 @@ class DialogMachine {
       case DialogState.askMaterials:
         return v == null ? 'Tudo bem.' : 'Anotei: $v.';
       case DialogState.askBatchYield:
-        return v == null ? 'Tudo bem.' : 'Cada lote rende $v.';
+        return v == null
+            ? 'Tudo bem.'
+            : 'Cada ${_session.units.batchName} rende ${_session.units.count(v as int)}.';
       case DialogState.askProductionTime:
         return v == null ? 'Tudo bem.' : 'Leva ${speakDuration(v as int)}.';
       case DialogState.askCharacteristics:
@@ -778,7 +1122,7 @@ class DialogMachine {
       case DialogState.askMaterials:
         return 'Corrigido: materiais, $v.';
       case DialogState.askBatchYield:
-        return 'Corrigido: rende $v por lote.';
+        return 'Corrigido: rende ${_session.units.count(v as int)} por ${_session.units.batchName}.';
       case DialogState.askProductionTime:
         return 'Corrigido: leva ${speakDuration(v as int)}.';
       case DialogState.askCharacteristics:
@@ -834,6 +1178,11 @@ class DialogMachine {
   DialogResponse _correct(DialogState field, String? value) {
     if (!_canCorrect(field)) {
       return _retry('Essa informação ainda não foi respondida. ${_question(_state)}');
+    }
+    // No meio do custo detalhado: guarda os precos ja dados antes de corrigir a ficha. A
+    // entrevista recomeca dessa tabela depois (os precos dos mesmos ingredientes ficam).
+    if (_state == DialogState.costDetail && _interview != null) {
+      _session = _session.withCosts(CostBreakdown.fromJson(_interview!.table.toJson()));
     }
     // Do resultado ou da confirmacao, volta para a confirmacao com os valores novos.
     final resume = (_state == DialogState.result ||
@@ -962,6 +1311,8 @@ class DialogMachine {
       batchYield: saved.batchYield,
       productionMinutes: saved.productionMinutes,
       characteristics: saved.characteristics,
+      saleUnit: _session.saleUnit ?? saved.saleUnit,
+      batchName: _session.batchName ?? saved.batchName,
       costs: saved.costs == null ? null : CostBreakdown.fromJson(saved.costs!.toJson()),
     );
     if (_session.costs == null && saved.materials != null) {
@@ -998,8 +1349,17 @@ class DialogMachine {
         _ => null,
       };
 
-  String _resumeQuestion(DialogState s) =>
-      s == DialogState.confirm ? _confirmationText() : 'Voltando: ${_question(s)}';
+  String _resumeQuestion(DialogState s) {
+    if (s == DialogState.confirm) return _confirmationText();
+    if (s == DialogState.costDetail) {
+      // Volta ao custo com a tabela atualizada (ingredientes novos, precos mantidos).
+      _interview = null;
+      final r = _startInterview();
+      return r.text.replaceFirst('Vamos montar a tabela de custo de um lote.',
+          'Voltando ao custo:');
+    }
+    return 'Voltando: ${_question(s)}';
+  }
 
   // ---- internos ----
 
@@ -1022,7 +1382,10 @@ class DialogMachine {
         return 'Do que $product é feito? Fale os principais ingredientes ou materiais, '
             'por exemplo: ${materialsExample(_session.sector)}. Ou mande uma foto da receita.';
       case DialogState.askBatchYield:
-        return 'Quantas unidades rende cada produção? Por exemplo: uma fornada rende vinte.';
+        final u = _session.units;
+        return u.isGeneric && u.batch == null
+            ? 'Quantas unidades rende cada produção? Por exemplo: uma fornada rende vinte.'
+            : '${u.howMany} rende ${u.eachBatch}? Por exemplo: ${u.count(12)}.';
       case DialogState.askProductionTime:
         return 'Quanto tempo leva para produzir um lote? Por exemplo: duas horas.';
       case DialogState.askCharacteristics:
@@ -1030,12 +1393,12 @@ class DialogMachine {
             'Se não tiver, diga: pular.';
       case DialogState.askQuantity:
         return _session.batchYield != null
-            ? 'Quantas unidades você quer vender? Pode dizer um número, ou: um lote.'
-            : 'Quantas unidades você quer vender?';
+            ? '${_session.units.howMany} você quer vender? Pode dizer um número, ou: um ${_session.units.batchName}.'
+            : '${_session.units.howMany} você quer vender?';
       case DialogState.askCost:
         final q = _session.quantity;
         return q != null
-            ? 'Quanto você gasta no total para fazer $q? Some ingredientes, embalagem e '
+            ? 'Quanto você gasta no total para fazer ${_session.units.isGeneric ? q : _session.units.count(q)}? Some ingredientes, embalagem e '
                 'outros custos. Pode falar, por exemplo: cento e vinte reais.'
             : 'Quanto você gasta no total, em reais?';
       case DialogState.askMargin:
@@ -1056,9 +1419,20 @@ class DialogMachine {
   int? _parseQuantity(String input) {
     final t = normalizePt(input);
     final y = _session.batchYield;
-    // "duas panelas" = 2 lotes, nao 2 unidades (o rendimento e por panela/forma/fornada).
-    final lote = RegExp(r'\b(lotes?|fornadas?|producao|producoes|panelas?|formas?|'
-            r'assadeiras?|tabuleiros?|bandejas?|receitas?)\b')
+    final u = _session.units;
+    // "12 pedaços": o numero e de unidades de venda (mesmo que fale "de 1 bolo" depois).
+    if (!u.isGeneric) {
+      final m = RegExp('(\\S+(?:\\s+e\\s+\\S+)?)\\s+(?:${normalizePt(u.many)}|${normalizePt(u.one)})\\b')
+          .firstMatch(t);
+      if (m != null) {
+        final n = parseInteger(m[1]!);
+        if (n != null) return n;
+      }
+    }
+    // "duas panelas", "um bolo" = lotes, nao unidades (o rendimento e por lote).
+    final batch = u.batch == null ? '' : '|${normalizePt(u.batch!)}s?';
+    final lote = RegExp('\\b(lotes?|fornadas?|producao|producoes|panelas?|formas?|'
+            'assadeiras?|tabuleiros?|bandejas?|receitas?$batch)\\b')
         .firstMatch(t);
     if (y != null && lote != null) {
       final lots = parseInteger(t.substring(0, lote.start)) ?? 1;
@@ -1105,9 +1479,15 @@ class DialogMachine {
     return _goto(prev, _question(prev));
   }
 
+  /// "12 marmitas" (sem unidade de venda) ou "12 pedaços de bolo de cenoura".
+  String _itemsLabel(int q) {
+    final u = _session.units;
+    return u.isGeneric ? '$q ${_session.product}' : '${u.count(q)} de ${_session.product}';
+  }
+
   String _confirmationText() {
     final s = _session;
-    return 'Vou conferir: ${s.quantity} ${s.product}, custo total de '
+    return 'Vou conferir: ${_itemsLabel(s.quantity!)}, custo total de '
         '${speakBrl(s.totalCostCents!)}, margem de ${s.marginPercent} por cento. '
         'Está certo?';
   }
@@ -1123,13 +1503,15 @@ class DialogMachine {
     final r = _currentResult();
     _state = DialogState.offerDetail;
     final y = _session.batchYield;
+    final u = _session.units;
+    final q = r.input.quantity;
     final lot = y != null && y > 0
-        ? 'O preço do lote de $y unidades é ${speakBrl(r.unitPriceCents * y)}. '
+        ? 'O preço ${u.ofBatch(y)} é ${speakBrl(r.unitPriceCents * y)}. '
         : '';
-    final text = 'Para ${r.input.quantity} ${_session.product}, cada unidade custa '
-        '${speakBrl(r.unitCostCents)} para produzir. O preço da unidade é '
+    final text = 'Para ${_itemsLabel(q)}, ${u.eachOne} custa '
+        '${speakBrl(r.unitCostCents)} para produzir. O preço ${u.ofTheOne} é '
         '${speakBrl(r.unitPriceCents)}. $lot'
-        'Vendendo as ${r.input.quantity} unidades, você recebe '
+        'Vendendo ${u.feminine ? 'as' : 'os'} ${u.count(q)}, você recebe '
         '${speakBrl(r.totalRevenueCents)} e fica com ${speakBrl(r.profitCents)} de lucro. '
         'Esse cálculo considera só os custos que você informou. $_offerText';
     _lastPrompt = text;
@@ -1166,10 +1548,14 @@ class DialogMachine {
     _session = _session.withCosts(table);
     profile = _session.keepTriage();
     _state = DialogState.result;
-    final text = '${ack.isEmpty ? '' : '$ack '}${speakBreakdown(table)}';
+    final text = '${ack.isEmpty ? '' : '$ack '}${speakBreakdown(table, units: _session.units)} '
+        'Para enviar este resultado, diga: compartilhar.';
     _lastPrompt = text;
     return DialogResponse(text, _state, breakdown: table);
   }
+
+  static final _shareWords = RegExp(r'\b(compartilhar|compartilha|compartilhe|exportar|exporta|'
+      r'exporte|enviar|envia|envie|mandar|manda|mande|planilha|whatsapp|zap)\b');
 
   /// Tabela de custo para a tela: a da entrevista em andamento ou a salva/rascunho.
   CostBreakdown? get costTable => _interview?.table ?? _session.costs;

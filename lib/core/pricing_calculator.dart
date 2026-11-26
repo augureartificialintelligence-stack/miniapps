@@ -1,3 +1,5 @@
+import 'sale_unit.dart';
+
 /// Calculadora de preco determinística (sem LLM). Todo valor monetario em CENTAVOS (int)
 /// para evitar erros de ponto flutuante.
 class PricingInput {
@@ -132,20 +134,21 @@ class PriceSimulation {
 }
 
 /// Resumo falado da simulacao de preco.
-String speakSimulation(PriceSimulation s) {
-  final b = StringBuffer('Vendendo a unidade por ${speakBrl(s.priceCents)}: cada unidade '
+String speakSimulation(PriceSimulation s, {UnitWords units = UnitWords.generic}) {
+  final u = units;
+  final b = StringBuffer('Vendendo ${u.theOne} por ${speakBrl(s.priceCents)}: ${u.eachOne} '
       'custa ${speakBrl(s.unitCostCents)} para produzir, ');
   if (s.isLoss) {
-    b.write('então você tem prejuízo de ${speakBrl(-s.unitProfitCents)} por unidade. '
+    b.write('então você tem prejuízo de ${speakBrl(-s.unitProfitCents)} por ${u.one}. '
         'Atenção: esse preço fica abaixo do custo de produção.');
   } else if (s.unitProfitCents == 0) {
     b.write('então você empata: não tem lucro nem prejuízo.');
   } else {
-    b.write('então você lucra ${speakBrl(s.unitProfitCents)} por unidade, uma margem de '
+    b.write('então você lucra ${speakBrl(s.unitProfitCents)} por ${u.one}, uma margem de '
         '${s.marginPercent.round()} por cento.');
   }
   if (s.batchYield != null && !s.isLoss) {
-    b.write(' No lote de ${s.batchYield} unidades, você recebe ${speakBrl(s.batchRevenueCents!)} '
+    b.write(' N${u.ofBatch(s.batchYield!).substring(1)}, você recebe ${speakBrl(s.batchRevenueCents!)} '
         'e lucra ${speakBrl(s.batchProfitCents!)}.');
   }
   final sug = s.suggestedCents;

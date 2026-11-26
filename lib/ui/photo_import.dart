@@ -11,7 +11,10 @@ typedef PhotoImport = ({List<RecipeItem> recipe, List<PurchaseItem> purchases});
 
 class _Photo {
   _Photo(this.text, this.kind);
-  final String text;
+
+  /// Texto lido da foto. A pessoa pode editar (corrigir numero, nome, linha mal lida);
+  /// as listas sao refeitas a partir dele.
+  String text;
   DocKind kind;
   List<RecipeItem> get recipe => kind == DocKind.recipe ? parseRecipe(text) : const [];
   List<PurchaseItem> get purchases =>
@@ -197,6 +200,52 @@ class _PhotoImportPageState extends State<PhotoImportPage> {
     );
   }
 
+  /// Abre o texto lido da foto para corrigir. Ao salvar, as listas de ingredientes e
+  /// precos sao refeitas. Uma linha por ingrediente/produto ajuda a leitura.
+  Future<void> _editText(_Photo p) async {
+    final ctrl = TextEditingController(text: p.text);
+    final saved = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Editar texto lido'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                  p.kind == DocKind.recipe
+                      ? 'Um ingrediente por linha, com a quantidade. Ex.: 2 xícaras de farinha. '
+                          'Títulos como "Massa:" e "Cobertura:" separam as partes.'
+                      : 'Um produto por linha, com o preço no fim. Ex.: Farinha de trigo 5kg 25,90',
+                  style: Theme.of(ctx).textTheme.bodySmall),
+              const SizedBox(height: 8),
+              Flexible(
+                child: TextField(
+                  controller: ctrl,
+                  autofocus: true,
+                  minLines: 6,
+                  maxLines: 16,
+                  keyboardType: TextInputType.multiline,
+                  decoration: const InputDecoration(border: OutlineInputBorder()),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text), child: const Text('Salvar')),
+        ],
+      ),
+    );
+    ctrl.dispose();
+    if (saved == null || !mounted) return;
+    setState(() => p.text = saved);
+  }
+
   Widget _photoCard(int i, TextStyle? muted) {
     final p = _photos[i];
     final lines = p.kind == DocKind.recipe
@@ -220,6 +269,11 @@ class _PhotoImportPageState extends State<PhotoImportPage> {
             Row(children: [
               Text('Foto ${i + 1}', style: Theme.of(context).textTheme.titleMedium),
               const Spacer(),
+              IconButton(
+                tooltip: 'Editar texto lido',
+                onPressed: () => _editText(p),
+                icon: const Icon(Icons.edit_note),
+              ),
               IconButton(
                 tooltip: 'Remover foto',
                 onPressed: () => setState(() => _photos.removeAt(i)),

@@ -40,7 +40,7 @@ void main() {
       final r = m.handle('o rendimento é 15');
       expect(r.state, DialogState.askCost); // continua no custo
       expect(m.session.batchYield, 15);
-      expect(r.text, contains('Corrigido: rende 15 por lote'));
+      expect(r.text, contains('Corrigido: rende 15 unidades por lote'));
       expect(r.text, contains('Quanto você gasta'));
     });
 

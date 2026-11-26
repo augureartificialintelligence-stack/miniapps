@@ -6,6 +6,7 @@ import 'package:material_ui/material_ui.dart';
 import '../core/cost_breakdown.dart';
 import '../core/dialog_machine.dart';
 import '../core/pricing_calculator.dart';
+import '../core/sale_unit.dart';
 import '../core/pt_br_parser.dart' show Measure, MeasureKind, speakDuration, speakMeasure;
 import '../llm/llm_engine.dart';
 import '../llm/smart_dialog.dart';
@@ -13,6 +14,7 @@ import '../memory/conversation_store.dart';
 import '../vision/text_scanner.dart';
 import '../voice/voice_engines.dart';
 import 'photo_import.dart';
+import 'share_result.dart';
 
 /// Mensagem da conversa. Nao aparece na tela (a tela mostra so a pergunta atual e as
 /// listas), mas e salva para retomar a conversa se o app fechar.
@@ -108,6 +110,9 @@ class _VoiceScreenState extends State<VoiceScreen> {
   /// Envio automatico do texto ouvido (contagem regressiva no cartao "Entendi").
   Timer? _autoSend;
   int _autoSendLeft = 0;
+
+  /// O texto ouvido nao parece resposta da pergunta: o cartao nao envia sozinho.
+  bool _doubtful = false;
   static const _autoSendSeconds = 3;
 
   /// Fala o texto. Com [autoListen] e a conversa automatica ligada, abre o microfone
@@ -230,7 +235,13 @@ class _VoiceScreenState extends State<VoiceScreen> {
         _lastResult = null;
       }
     });
-    _speak(r.text, autoListen: true);
+    if (r.share) {
+      // "compartilhar"/"exportar" por voz: fala a confirmacao e abre as opcoes.
+      _speak(r.text);
+      WidgetsBinding.instance.addPostFrameCallback((_) => _openShare());
+    } else {
+      _speak(r.text, autoListen: true);
+    }
     _persist(r);
   }
 
@@ -297,6 +308,35 @@ class _VoiceScreenState extends State<VoiceScreen> {
     await widget.store?.startNewProduct();
     _machine.profile = SalesSession(company: _machine.profile.company);
     _restartScreen();
+  }
+
+  /// Ja ha resultado para compartilhar: preco calculado ou tabela de custo completa.
+  bool get _hasResult {
+    final t = _machine.costTable;
+    final tableDone = t != null &&
+        t.unitPriceCents != null &&
+        t.materials.isNotEmpty &&
+        t.materials.every((m) => m.costCents != null);
+    final atEnd = _machine.state == DialogState.result || _machine.state == DialogState.offerDetail;
+    return atEnd && (_lastResult != null || tableDone);
+  }
+
+  /// Opcoes de envio do resultado: resumo por mensagem ou planilha.
+  Future<void> _openShare() async {
+    if (!mounted) return;
+    _cancelListening();
+    _stopSpeaking();
+    final s = _machine.session;
+    final t = _machine.costTable;
+    final tableDone = t != null && t.materials.isNotEmpty;
+    await shareResultSheet(
+      context,
+      session: s,
+      result: _lastResult,
+      costs: tableDone ? t : null,
+      simulation: _machine.simulation,
+      onError: (e) => _notice('Não consegui abrir o compartilhamento: $e'),
+    );
   }
 
   /// "Meus produtos": lista os produtos salvos para voltar a um deles.
@@ -514,7 +554,16 @@ class _VoiceScreenState extends State<VoiceScreen> {
           _pendingTranscript = full.isEmpty ? null : full;
         }
       });
-      if (isFinal && _pendingTranscript != null) _startAutoSend();
+      if (isFinal && _pendingTranscript != null) {
+        // So envia sozinho o que parece resposta; ruido, frase cortada ou conversa
+        // esperam a pessoa confirmar ou continuar falando.
+        _doubtful = !_machine.looksLikeAnswer(_pendingTranscript!);
+        if (_doubtful) {
+          debugPrint('[AUGURE][STT] nao parece resposta, aguardando: "$_pendingTranscript"');
+        } else {
+          _startAutoSend();
+        }
+      }
     });
   }
 
@@ -619,9 +668,18 @@ class _VoiceScreenState extends State<VoiceScreen> {
                   _ProfileCard(
                       session: s,
                       onCorrect: _busy || _listening ? null : _correctField),
-                  if (table != null && table.materials.isNotEmpty) _CostTableCard(table),
-                  if (_lastResult != null) _ResultCard(_lastResult!, s.batchYield),
-                  if (_machine.simulation != null) _SimulationCard(_machine.simulation!),
+                  if (table != null && table.materials.isNotEmpty) _CostTableCard(table, s.units),
+                  if (_lastResult != null) _ResultCard(_lastResult!, s.batchYield, s.units),
+                  if (_machine.simulation != null) _SimulationCard(_machine.simulation!, s.units),
+                  if (_hasResult)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: FilledButton.tonalIcon(
+                        onPressed: _busy ? null : _openShare,
+                        icon: const Icon(Icons.ios_share),
+                        label: const Text('Compartilhar ou exportar o resultado'),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -747,6 +805,17 @@ class _VoiceScreenState extends State<VoiceScreen> {
                 const SizedBox(height: 4),
                 Text('Isso responde: ${_questionLabel(_machine.state)}',
                     style: Theme.of(context).textTheme.bodySmall),
+                if (_doubtful && _autoSendLeft == 0)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                        'Isso não parece a resposta da pergunta. Toque em "Está certo" para '
+                        'enviar mesmo assim, ou no microfone para continuar falando.',
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(fontWeight: FontWeight.bold)),
+                  ),
                 if (_autoSendLeft > 0)
                   Padding(
                     padding: const EdgeInsets.only(top: 4),
@@ -846,13 +915,14 @@ class _ProfileCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final s = session;
-    final rows = <(DialogState, String, String)>[
+    final rows = <(DialogState?, String, String)>[
       if (s.company != null) (DialogState.askCompany, 'Empresa', s.company!),
       if (s.sector != null) (DialogState.askSector, 'Ramo', s.sector!),
       if (s.product != null) (DialogState.askProduct, 'Produto', s.product!),
       if (s.materials != null) (DialogState.askMaterials, 'Ingredientes', s.materials!),
+      if (s.saleUnit != null) (null, 'Vende por', s.units.one),
       if (s.batchYield != null)
-        (DialogState.askBatchYield, 'Rende por lote', '${s.batchYield} unidades'),
+        (DialogState.askBatchYield, 'Rende por ${s.units.batchName}', s.units.count(s.batchYield!)),
       if (s.productionMinutes != null)
         (DialogState.askProductionTime, 'Tempo por lote', speakDuration(s.productionMinutes!)),
       if (s.characteristics != null)
@@ -890,11 +960,14 @@ class _ProfileCard extends StatelessWidget {
                       ),
                     ),
                   ),
-                  IconButton(
-                    tooltip: 'Corrigir $label',
-                    onPressed: onCorrect == null ? null : () => onCorrect!(field, value),
-                    icon: const Icon(Icons.edit_outlined, size: 20),
-                  ),
+                  if (field != null)
+                    IconButton(
+                      tooltip: 'Corrigir $label',
+                      onPressed: onCorrect == null ? null : () => onCorrect!(field, value),
+                      icon: const Icon(Icons.edit_outlined, size: 20),
+                    )
+                  else
+                    const SizedBox(width: 48),
                 ],
               ),
           ],
@@ -907,8 +980,9 @@ class _ProfileCard extends StatelessWidget {
 /// Lista de ingredientes/materiais (por parte do produto) com quantidade, preco e custo
 /// no lote; no fim, custo do lote, custo da unidade, preco da unidade e preco do lote.
 class _CostTableCard extends StatelessWidget {
-  const _CostTableCard(this.t);
+  const _CostTableCard(this.t, this.u);
   final CostBreakdown t;
+  final UnitWords u;
 
   @override
   Widget build(BuildContext context) {
@@ -970,7 +1044,10 @@ class _CostTableCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('Ingredientes e custos do lote', style: theme.textTheme.titleMedium),
-            if (t.batchYield != null) Text('Lote de ${t.batchYield} unidades', style: muted),
+            if (t.batchYield != null)
+              Text('${u.batch == null ? 'Lote' : '${u.batch![0].toUpperCase()}${u.batch!.substring(1)}'}'
+                  ' de ${u.count(t.batchYield!)}',
+                  style: muted),
             for (final (part, items) in groups) ...[
               if (part != null) ...[
                 const SizedBox(height: 8),
@@ -1007,16 +1084,16 @@ class _CostTableCard extends StatelessWidget {
                 formatBrl(t.batchCents),
                 bold: true),
             if (t.unitCostCents != null)
-              line('Custo de produção da unidade', null, formatBrl(t.unitCostCents!)),
+              line('Custo de produção ${u.ofTheOne}', null, formatBrl(t.unitCostCents!)),
             if (t.unitPriceCents != null) ...[
               const Divider(height: 20),
-              line('Preço da unidade', 'margem de ${t.marginPercent}%',
+              line('Preço ${u.ofTheOne}', 'margem de ${t.marginPercent}%',
                   formatBrl(t.unitPriceCents!),
                   bold: true),
-              line('Preço do lote', '${t.batchYield} unidades', formatBrl(t.batchPriceCents!),
+              line('Preço ${u.ofBatch(t.batchYield!)}', null, formatBrl(t.batchPriceCents!),
                   bold: true),
-              line('Lucro por unidade', null, formatBrl(t.unitProfitCents!)),
-              line('Lucro do lote', null, formatBrl(t.batchProfitCents!)),
+              line('Lucro por ${u.one}', null, formatBrl(t.unitProfitCents!)),
+              line('Lucro ${u.ofBatch(t.batchYield!)}', null, formatBrl(t.batchProfitCents!)),
             ],
           ],
         ),
@@ -1028,8 +1105,9 @@ class _CostTableCard extends StatelessWidget {
 /// Simulacao com o preco escolhido pela pessoa: lucro, margem real e comparacao com o
 /// preco sugerido. Em vermelho quando da prejuizo.
 class _SimulationCard extends StatelessWidget {
-  const _SimulationCard(this.s);
+  const _SimulationCard(this.s, this.u);
   final PriceSimulation s;
+  final UnitWords u;
 
   @override
   Widget build(BuildContext context) {
@@ -1056,14 +1134,17 @@ class _SimulationCard extends StatelessWidget {
             Text(loss ? 'Simulação: preço com PREJUÍZO' : 'Simulação com o seu preço',
                 style: Theme.of(context).textTheme.titleMedium?.copyWith(color: fg)),
             const SizedBox(height: 8),
-            row('Preço da unidade', formatBrl(s.priceCents), big: true),
-            row('Custo de produção da unidade', formatBrl(s.unitCostCents)),
-            row(loss ? 'Prejuízo por unidade' : 'Lucro por unidade',
+            row('Preço ${u.ofTheOne}', formatBrl(s.priceCents), big: true),
+            row('Custo de produção ${u.ofTheOne}', formatBrl(s.unitCostCents)),
+            row(loss ? 'Prejuízo por ${u.one}' : 'Lucro por ${u.one}',
                 formatBrl(s.unitProfitCents.abs())),
-            row('Margem real', '%'),
+            row('Margem real', '${s.marginPercent.round()}%'),
             if (s.batchYield != null) ...[
-              row('Preço do lote ( unidades)', formatBrl(s.batchRevenueCents!)),
-              row(s.batchProfitCents! < 0 ? 'Prejuízo do lote' : 'Lucro do lote',
+              row('Preço ${u.ofBatch(s.batchYield!)}', formatBrl(s.batchRevenueCents!)),
+              row(
+                  s.batchProfitCents! < 0
+                      ? 'Prejuízo ${u.ofBatch(s.batchYield!)}'
+                      : 'Lucro ${u.ofBatch(s.batchYield!)}',
                   formatBrl(s.batchProfitCents!.abs())),
             ],
             if (s.suggestedCents != null) row('Preço sugerido', formatBrl(s.suggestedCents!)),
@@ -1076,9 +1157,10 @@ class _SimulationCard extends StatelessWidget {
 
 /// Resultado do calculo: preco da unidade separado do preco do lote.
 class _ResultCard extends StatelessWidget {
-  const _ResultCard(this.r, this.batchYield);
+  const _ResultCard(this.r, this.batchYield, this.u);
   final PricingResult r;
   final int? batchYield;
+  final UnitWords u;
 
   @override
   Widget build(BuildContext context) {
@@ -1093,13 +1175,15 @@ class _ResultCard extends StatelessWidget {
           children: [
             Text('Preço', style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 8),
-            _row(context, 'Custo de produção da unidade', formatBrl(r.unitCostCents)),
-            _row(context, 'Preço da unidade', formatBrl(r.unitPriceCents), big: true),
+            _row(context, 'Custo de produção ${u.ofTheOne}', formatBrl(r.unitCostCents)),
+            _row(context, 'Preço ${u.ofTheOne}', formatBrl(r.unitPriceCents), big: true),
             if (y != null && y > 0)
-              _row(context, 'Preço do lote ($y unidades)', formatBrl(r.unitPriceCents * y),
-                  big: true),
-            if (y != q) _row(context, 'Total das $q unidades', formatBrl(r.totalRevenueCents)),
-            _row(context, 'Lucro (nas $q unidades)', formatBrl(r.profitCents)),
+              _row(context, 'Preço ${u.ofBatch(y)}', formatBrl(r.unitPriceCents * y), big: true),
+            if (y != q)
+              _row(context, 'Total ${u.feminine ? 'das' : 'dos'} ${u.count(q)}',
+                  formatBrl(r.totalRevenueCents)),
+            _row(context, 'Lucro (${u.feminine ? 'nas' : 'nos'} ${u.count(q)})',
+                formatBrl(r.profitCents)),
           ],
         ),
       ),

@@ -33,7 +33,7 @@ void main() {
 
   void setUpDictation() {
     rec = FakeRecognizer();
-    d = ContinuousDictation(rec);
+    d = ContinuousDictation(rec, silence: const Duration(seconds: 3));
     results = [];
   }
 
@@ -129,6 +129,22 @@ void main() {
       rec.systemEnds(); // "done"
       t.elapse(const Duration(milliseconds: 500));
       expect(rec.starts, 2);
+    });
+  });
+
+  test('padrao do app: 4 s de silencio (pausa para pensar nao corta a frase)', () {
+    fakeAsync((t) {
+      rec = FakeRecognizer();
+      d = ContinuousDictation(rec);
+      results = [];
+      d.listen((text, fin) => results.add((text, fin)));
+      t.flushMicrotasks();
+      rec.say('então olha só, primeira');
+      t.elapse(const Duration(milliseconds: 3500));
+      expect(finalText(), isNull); // 3,5 s pensando: ainda ouvindo
+      rec.say('então olha só, primeira a massa');
+      t.elapse(const Duration(seconds: 4));
+      expect(finalText(), 'então olha só, primeira a massa');
     });
   });
 }
